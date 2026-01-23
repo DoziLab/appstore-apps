@@ -1,0 +1,81 @@
+
+#cloud-config
+package_update: true
+package_upgrade: false
+
+ssh_pwauth: false
+disable_root: true
+
+users:
+  - default
+  - name: __GROUP_LOGIN__
+    gecos: "Group Login"
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "__GROUP_PUBKEY__"
+
+write_files:
+  - path: /usr/local/bin/dozilab-postgres-init.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      PG_VER="__PG_VERSION__"
+      DB_NAME="__DB_NAME__"
+      DB_USER="__DB_USER__"
+      DB_PASS="__DB_PASS__"
+
+      echo "Installing PostgreSQL ${PG_VER}..."
+      apt-get update -y
+      apt-get install -y "postgresql-${PG_VER}" "postgresql-client-${PG_VER}"
+
+      # Ensure Postgres listens only on localhost (safe default)
+      PG_CONF="/etc/postgresql/${PG_VER}/main/postgresql.conf"
+      HBA_CONF="/etc/postgresql/${PG_VER}/main/pg_hba.conf"
+
+      sed -i "s/^#\\?listen_addresses\\s*=.*$/listen_addresses = 'localhost'/" "${PG_CONF}"
+
+      # Ensure local auth is allowed
+      # Keep defaults, but we ensure password auth for local connections to the created user
+      if ! grep -qE "host\\s+${DB_NAME}\\s+${DB_USER}\\s+127\\.0\\.0\\.1/32\\s+scram-sha-256" "${HBA_CONF}"; then
+        echo "host ${DB_NAME} ${DB_USER} 127.0.0.1/32 scram-sha-256" >> "${HBA_CONF}"
+      fi
+
+      systemctl enable postgresql
+      systemctl restart postgresql
+
+      echo "Creating DB/User..."
+      # Create user (idempotent-ish)
+      sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
+      DO \$\$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}') THEN
+          CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';
+        ELSE
+          ALTER ROLE ${DB_USER} WITH PASSWORD '${DB_PASS}';
+        END IF;
+      END
+      \$\$
+      ;
+      SQL
+
+      # Create database owned by user if not exists
+      sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
+      DO \$\$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}') THEN
+          CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};
+        END IF;
+      END
+      \$\$
+      ;
+      SQL
+
+      echo "PostgreSQL ready. Access via SSH tunnel only."
+
+runcmd:
+  - /usr/local/bin/dozilab-postgres-init.sh
+

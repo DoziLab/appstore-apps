@@ -1,0 +1,73 @@
+
+id: postgres-group-db
+name: PostgreSQL Group Database
+version: 1.0.0
+description: "Provisioniert pro Gruppe eine Ubuntu-VM mit PostgreSQL. Zugriff erfolgt sicher via SSH-Tunnel (Postgres nur localhost)."
+
+parameters:
+  instance_name:
+    type: string
+    required: true
+    description: "Eindeutiger Name der Instanz/Stacks (z.B. kursX-grp1-db)."
+
+  image:
+    type: string
+    required: true
+    default: "Ubuntu 22.04 2025-01"
+    description: "OpenStack Image Name/ID."
+
+  flavor:
+    type: string
+    required: true
+    default: "gp1.small"
+    description: "OpenStack Flavor."
+
+  network:
+    type: string
+    required: true
+    default: "NAT"
+    description: "Internes Tenant-Netzwerk."
+
+  external_network:
+    type: string
+    required: true
+    default: "DHBW"
+    description: "Externes Netzwerk für Floating IPs."
+
+  group_login:
+    type: string
+    required: true
+    description: "Linux Username für Gruppen-Zugang (SSH)."
+
+  group_public_key:
+    type: string
+    required: true
+    description: "SSH Public Key der Gruppe."
+
+  ssh_cidr:
+    type: string
+    required: false
+    default: "0.0.0.0/0"
+    description: "CIDR, von dem aus SSH erreichbar ist (sicherer: deine IP/32)."
+
+  db_name:
+    type: string
+    required: true
+    description: "Name der PostgreSQL Datenbank."
+
+  db_user:
+    type: string
+    required: true
+    description: "Name des PostgreSQL Users."
+
+  db_password:
+    type: string
+    required: true
+    description: "Passwort für den PostgreSQL User (kommt vom Backend)."
+
+  postgres_version:
+    type: int
+    required: false
+    default: 14
+    description: "PostgreSQL Major-Version (Ubuntu repo)."
+

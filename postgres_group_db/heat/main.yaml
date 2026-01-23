@@ -1,0 +1,148 @@
+
+heat_template_version: 2018-08-31
+description: PostgreSQL Group DB (Floating IP + SSH tunnel; Postgres localhost only)
+
+parameters:
+  instance_name:
+    type: string
+
+  image:
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+
+  flavor:
+    type: string
+    default: "gp1.small"
+
+  network:
+    type: string
+    default: "NAT"
+
+  external_network:
+    type: string
+    default: "DHBW"
+
+  group_login:
+    type: string
+    constraints:
+      - length: { min: 1, max: 32 }
+
+  group_public_key:
+    type: string
+
+  ssh_cidr:
+    type: string
+    default: "0.0.0.0/0"
+
+  db_name:
+    type: string
+
+  db_user:
+    type: string
+
+  db_password:
+    type: string
+    hidden: true
+
+  postgres_version:
+    type: number
+    default: 14
+
+resources:
+  secgroup:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Allow SSH + ICMP (Postgres via SSH tunnel only)
+      rules:
+        - direction: ingress
+          ethertype: IPv4
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+          remote_ip_prefix: { get_param: ssh_cidr }
+
+        - direction: ingress
+          ethertype: IPv4
+          protocol: icmp
+          remote_ip_prefix: 0.0.0.0/0
+
+  port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_param: network }
+      security_groups:
+        - { get_resource: secgroup }
+
+  server:
+    type: OS::Nova::Server
+    properties:
+      name: { get_param: instance_name }
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: { get_file: ../cloud-init/user-data.yaml }
+          params:
+            __GROUP_LOGIN__: { get_param: group_login }
+            __GROUP_PUBKEY__: { get_param: group_public_key }
+            __DB_NAME__: { get_param: db_name }
+            __DB_USER__: { get_param: db_user }
+            __DB_PASS__: { get_param: db_password }
+            __PG_VERSION__: { get_param: postgres_version }
+
+      networks:
+        - port: { get_resource: port }
+
+  fip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network }
+
+  fip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: fip }
+      port_id: { get_resource: port }
+
+outputs:
+  floating_ip:
+    description: Public Floating IP
+    value: { get_attr: [fip, floating_ip_address] }
+
+  ssh_user:
+    description: SSH username for group access
+    value: { get_param: group_login }
+
+  ssh_port:
+    description: SSH port
+    value: 22
+
+  private_ip:
+    description: Private IP on tenant network
+    value: { get_attr: [port, fixed_ips, 0, ip_address] }
+
+  db_name:
+    description: PostgreSQL database name
+    value: { get_param: db_name }
+
+  db_user:
+    description: PostgreSQL username
+    value: { get_param: db_user }
+
+  server_id:
+    description: Nova server ID
+    value: { get_resource: server }
+
+  ssh_tunnel_hint:
+    description: How to access Postgres securely via SSH tunnel
+    value:
+      str_replace:
+        template: "ssh -i <private_key> -L 5432:localhost:5432 USER@FIP  # then: psql -h 127.0.0.1 -p 5432 -U DBUSER DBNAME"
+        params:
+          USER: { get_param: group_login }
+          FIP: { get_attr: [fip, floating_ip_address] }
+          DBUSER: { get_param: db_user }
+          DBNAME: { get_param: db_name }
+

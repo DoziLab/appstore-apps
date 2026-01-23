@@ -1,2 +1,15 @@
 .envrc
 project-openrc.sh
+# macOS
+.DS_Store
+
+# local logs / terminal outputs
+watch_*
+
+# Keys / certs (safety)
+*.pem
+*.key
+
+# env files
+.env
+.env.*
