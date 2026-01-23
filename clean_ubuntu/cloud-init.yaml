@@ -2,107 +2,115 @@
 package_update: true
 package_upgrade: false
 
-packages:
-  - nginx
-
 write_files:
-  # Our SSH settings (some keys can be overridden, but keep them here)
-  - path: /etc/ssh/sshd_config.d/99-dozilab-ssh.conf
-    permissions: "0644"
-    content: |
-      # DoziLab: allow password logins for student accounts (cloud image may disable it)
-      PasswordAuthentication yes
-      KbdInteractiveAuthentication yes
-      ChallengeResponseAuthentication yes
-      UsePAM yes
-      PermitRootLogin no
-
-  - path: /usr/local/bin/dozilab-student-setup.sh
+  - path: /usr/local/bin/dozilab-multiuser-setup.sh
     permissions: "0755"
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
 
-      TITLE="__PAGE_TITLE__"
-      LABEL="__STACK_LABEL__"
-      U="__STUDENT_USER__"
-      P="__STUDENT_PASS__"
+      STUDENTS_JSON='__STUDENTS_JSON__'
       FORCE="__FORCE_CHANGE__"
       WORKDIR="__WORKDIR__"
 
-      echo "setup started $(date -Is)" > /var/log/dozilab-student-setup.log
+      export STUDENTS_JSON FORCE WORKDIR
 
-      # Create student user (no sudo)
-      if ! id "$U" >/dev/null 2>&1; then
-        useradd -m -s /bin/bash "$U"
-      fi
+      echo "multiuser setup started $(date -Is)" > /var/log/dozilab-multiuser.log
 
-      # Set student password (do not echo it anywhere)
-      echo "${U}:${P}" | chpasswd
-
-      # Force password change on first login (optional)
-      if [ "$FORCE" = "True" ] || [ "$FORCE" = "true" ] || [ "$FORCE" = "1" ]; then
-        chage -d 0 "$U" || true
-      fi
-
-      # Restrict home + workdir to the student only
-      chmod 700 "/home/${U}"
-      mkdir -p "/home/${U}/${WORKDIR}"
-      chown -R "${U}:${U}" "/home/${U}/${WORKDIR}"
-      chmod 700 "/home/${U}/${WORKDIR}"
-
-      # On login, land in ~/WORKDIR
-      if ! grep -q "cd \"\$HOME/${WORKDIR}\"" "/home/${U}/.profile" 2>/dev/null; then
-        echo "cd \"\$HOME/${WORKDIR}\"" >> "/home/${U}/.profile"
-      fi
-      chown "${U}:${U}" "/home/${U}/.profile"
-
-      # OPTIONAL: restrict SSH logins to ubuntu + student only
-      # (helps reduce brute-force surface)
-      if [ ! -f /etc/ssh/sshd_config.d/98-dozilab-allowusers.conf ]; then
-        cat >/etc/ssh/sshd_config.d/98-dozilab-allowusers.conf <<EOF
-      AllowUsers ubuntu ${U}
-      EOF
-      fi
-
-      # CRITICAL: Ubuntu cloud images often ship:
-      # /etc/ssh/sshd_config.d/60-cloudimg-settings.conf: PasswordAuthentication no
-      # which may "win" in your environment. Patch it directly.
+      # --- 1) Force password auth on Ubuntu cloud image (source of truth) ---
       if [ -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf ]; then
-        # Replace "no" -> "yes" (case-insensitive, safe if already yes)
         sed -i -E 's/^\s*PasswordAuthentication\s+no\s*$/PasswordAuthentication yes/i' \
           /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
 
-        # If the line does not exist (unlikely), append it
         if ! grep -qiE '^\s*PasswordAuthentication\s+' /etc/ssh/sshd_config.d/60-cloudimg-settings.conf; then
           echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
         fi
       fi
 
-      # Restart SSH to apply config
+      cat >/etc/ssh/sshd_config.d/99-dozilab-multiuser.conf <<'EOF'
+      PasswordAuthentication yes
+      KbdInteractiveAuthentication yes
+      ChallengeResponseAuthentication yes
+      UsePAM yes
+      PermitRootLogin no
+      EOF
+
+      # --- 2) Parse JSON mapping username -> password and create users ---
+      python3 - <<'PY'
+      import json, os, re, sys, subprocess
+
+      students_json = os.environ.get("STUDENTS_JSON", "")
+      force = os.environ.get("FORCE", "true").lower() in ("1", "true", "yes")
+      workdir = os.environ.get("WORKDIR", "work")
+
+      if not students_json.strip():
+          print("students JSON is empty", file=sys.stderr)
+          sys.exit(1)
+
+      try:
+          data = json.loads(students_json)
+      except Exception as e:
+          print(f"students JSON parse error: {e}", file=sys.stderr)
+          sys.exit(1)
+
+      if not isinstance(data, dict) or not data:
+          print("students must be a non-empty JSON object: {username: password, ...}", file=sys.stderr)
+          sys.exit(1)
+
+      rx = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+      def run(cmd):
+          subprocess.run(cmd, check=True)
+
+      for u, p in data.items():
+          if not isinstance(u, str) or not rx.match(u):
+              print(f"Invalid username: {u!r}", file=sys.stderr)
+              sys.exit(1)
+          if not isinstance(p, str) or len(p) < 8:
+              print(f"Password too short for {u}", file=sys.stderr)
+              sys.exit(1)
+
+          # create user (id returns non-zero if missing)
+          if subprocess.run(["id", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+              run(["useradd", "-m", "-s", "/bin/bash", u])
+
+          # set password safely (no shell quoting issues)
+          subprocess.run(["chpasswd"], input=f"{u}:{p}\n", text=True, check=True)
+
+          if force:
+              subprocess.run(["chage", "-d", "0", u], check=False)
+
+          # lock down home
+          run(["chmod", "700", f"/home/{u}"])
+
+          # workdir + permissions
+          run(["mkdir", "-p", f"/home/{u}/{workdir}"])
+          run(["chown", "-R", f"{u}:{u}", f"/home/{u}/{workdir}"])
+          run(["chmod", "700", f"/home/{u}/{workdir}"])
+
+          # land in workdir on login
+          profile = f"/home/{u}/.profile"
+          line = f'cd "$HOME/{workdir}"\n'
+          try:
+              with open(profile, "r", encoding="utf-8", errors="ignore") as f:
+                  txt = f.read()
+          except FileNotFoundError:
+              txt = ""
+          if f'cd "$HOME/{workdir}"' not in txt:
+              with open(profile, "a", encoding="utf-8") as f:
+                  f.write(line)
+          run(["chown", f"{u}:{u}", profile])
+
+      # AllowUsers ubuntu + all students
+      allow = "AllowUsers ubuntu " + " ".join(sorted(data.keys())) + "\n"
+      with open("/etc/ssh/sshd_config.d/98-dozilab-allowusers.conf", "w", encoding="utf-8") as f:
+          f.write(allow)
+      PY
+
       systemctl restart ssh
-
-      # Simple optional dashboard
-      PRIVATE_IP="$(hostname -I | awk '{print $1}')"
-      HOST="$(hostname)"
-      DEPLOY_TIME="$(date -Is)"
-      cat >/var/www/html/index.html <<HTML
-      <!doctype html>
-      <html lang="de"><head><meta charset="utf-8"><title>${TITLE}</title></head>
-      <body style="font-family:system-ui;margin:24px">
-        <h1>${TITLE}</h1>
-        <p><b>Stack:</b> ${LABEL}</p>
-        <p><b>Host:</b> ${HOST}</p>
-        <p><b>Private IP:</b> ${PRIVATE_IP}</p>
-        <p><b>Deployed:</b> ${DEPLOY_TIME}</p>
-        <p><b>Student user:</b> <code>${U}</code> (lands in <code>~/${WORKDIR}</code>)</p>
-      </body></html>
-      HTML
-      systemctl enable --now nginx
-
-      echo "setup finished $(date -Is)" >> /var/log/dozilab-student-setup.log
+      echo "multiuser setup finished $(date -Is)" >> /var/log/dozilab-multiuser.log
 
 runcmd:
-  - [ bash, -lc, "/usr/local/bin/dozilab-student-setup.sh" ]
+  - [ bash, -lc, "/usr/local/bin/dozilab-multiuser-setup.sh" ]
 
-final_message: "DoziLab Student VM ready (password SSH enabled)"
+final_message: "DoziLab multi-user VM ready (password SSH enabled)"

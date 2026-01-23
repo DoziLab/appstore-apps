@@ -22,6 +22,7 @@ parameters:
   - name: image
     type: string
     default: "Ubuntu 22.04 2025-01"
+    
 
   - name: flavor
     type: string

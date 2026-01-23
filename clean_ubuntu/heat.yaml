@@ -1,8 +1,7 @@
 heat_template_version: 2018-08-31
 
 description: >
-  DoziLab Student VM: Ubuntu VM + Floating IP + password SSH for one student user.
-  Admin access remains via keypair. Student lands in ~/work.
+  DoziLab Multi-Student VM: Ubuntu VM + Floating IP + password SSH for multiple users.
 
 parameters:
   image:
@@ -15,53 +14,37 @@ parameters:
 
   network:
     type: string
-    description: Internal tenant network for the VM
     default: "NAT"
 
   external_network:
     type: string
-    description: Network that provides Floating IPs
     default: "DHBW"
 
   key_name:
     type: string
-    description: Admin keypair injected into VM (for ubuntu user)
     default: "heat-bastion-key"
 
   ssh_cidr:
     type: string
-    description: Who may SSH to the VM (recommend your IP/32 or VPN range)
     default: "0.0.0.0/0"
 
-  student_username:
-    type: string
-    description: Student login username
-    default: "alice"
-
-  student_password:
-    type: string
-    description: Student login password (will be set via cloud-init)
+  students:
+    type: json
+    description: "Map of username -> password. Example: { alice: 'pw', bob: 'pw2' }"
     hidden: true
-    constraints:
-      - length: { min: 10 }
 
   force_password_change:
     type: boolean
-    description: Force student to change password on first login
     default: true
 
   workdir:
     type: string
-    description: Folder inside student's home to cd into on login
     default: "work"
-
-  page_title:
-    type: string
-    default: "DoziLab – Student VM"
 
   stack_label:
     type: string
-    default: "studentvm"
+    default: "multistudent"
+
 
 resources:
   secgroup:
@@ -75,14 +58,12 @@ resources:
           port_range_min: 22
           port_range_max: 22
           remote_ip_prefix: { get_param: ssh_cidr }
-
         - direction: ingress
           ethertype: IPv4
           protocol: tcp
           port_range_min: 80
           port_range_max: 80
           remote_ip_prefix: 0.0.0.0/0
-
         - direction: ingress
           ethertype: IPv4
           protocol: icmp
@@ -116,12 +97,10 @@ resources:
         str_replace:
           template: { get_file: cloud-init.yaml }
           params:
-            __PAGE_TITLE__: { get_param: page_title }
-            __STACK_LABEL__: { get_param: stack_label }
-            __STUDENT_USER__: { get_param: student_username }
-            __STUDENT_PASS__: { get_param: student_password }
+            __STUDENTS_JSON__: { get_param: students }
             __FORCE_CHANGE__: { get_param: force_password_change }
             __WORKDIR__: { get_param: workdir }
+
 
   fip:
     type: OS::Neutron::FloatingIP
@@ -136,34 +115,13 @@ resources:
 
 outputs:
   floating_ip:
-    description: Public Floating IP
     value: { get_attr: [fip, floating_ip_address] }
 
-  student_username:
-    description: Student username
-    value: { get_param: student_username }
-
-  student_ssh:
-    description: Student login command (will ask for password)
+  ssh_hint:
+    description: "Students login like: ssh <username>@<floating_ip>"
     value:
       str_replace:
-        template: "ssh USER@FIP"
-        params:
-          USER: { get_param: student_username }
-          FIP: { get_attr: [fip, floating_ip_address] }
-
-  admin_ssh:
-    description: Admin login command (key-based, adjust key path)
-    value:
-      str_replace:
-        template: "ssh -i ~/.ssh/heat-bastion-key.pem ubuntu@FIP"
+        template: "ssh <username>@FIP"
         params:
           FIP: { get_attr: [fip, floating_ip_address] }
 
-  http_url:
-    description: Optional dashboard (HTTP)
-    value:
-      str_replace:
-        template: "http://FIP/"
-        params:
-          FIP: { get_attr: [fip, floating_ip_address] }
