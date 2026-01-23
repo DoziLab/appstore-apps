@@ -1,0 +1,74 @@
+app:
+  name: dozilab-studentvm
+  version: 0.2.0
+  description: "Deploy a student VM with username/password SSH login and workdir landing."
+  owner_team: app-team
+
+artifacts:
+  heat_template: heat.yaml
+  cloud_init: cloud-init.yaml
+
+parameters:
+  - name: network
+    type: string
+    default: NAT
+    required: true
+
+  - name: external_network
+    type: string
+    default: DHBW
+    required: true
+
+  - name: image
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+
+  - name: flavor
+    type: string
+    default: gp1.small
+
+  - name: key_name
+    type: string
+    default: heat-bastion-key
+
+  - name: ssh_cidr
+    type: string
+    default: 0.0.0.0/0
+
+  - name: student_username
+    type: string
+    default: alice
+    required: true
+
+  - name: student_password
+    type: string
+    secret: true
+    required: true
+
+  - name: force_password_change
+    type: boolean
+    default: true
+
+  - name: workdir
+    type: string
+    default: work
+
+  - name: page_title
+    type: string
+    default: "DoziLab – Student VM"
+
+  - name: stack_label
+    type: string
+    default: "studentvm"
+
+outputs:
+  - name: floating_ip
+    from_heat_output: floating_ip
+  - name: student_username
+    from_heat_output: student_username
+  - name: student_ssh
+    from_heat_output: student_ssh
+  - name: admin_ssh
+    from_heat_output: admin_ssh
+  - name: http_url
+    from_heat_output: http_url
