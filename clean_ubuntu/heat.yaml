@@ -1,3 +1,4 @@
+#clean_ubuntu/heat.yaml
 heat_template_version: 2018-08-31
 
 description: >
@@ -44,6 +45,23 @@ parameters:
   stack_label:
     type: string
     default: "multistudent"
+
+  pw_min_length:
+    type: number
+    default: 12
+
+  pw_require_digit:
+    type: boolean
+    default: true
+
+  pw_require_upper:
+    type: boolean
+    default: true
+
+  pw_require_special:
+    type: boolean
+    default: true
+
 
 
 resources:
@@ -100,6 +118,11 @@ resources:
             __STUDENTS_JSON__: { get_param: students }
             __FORCE_CHANGE__: { get_param: force_password_change }
             __WORKDIR__: { get_param: workdir }
+
+            __PW_MIN_LENGTH__: { get_param: pw_min_length }
+            __PW_REQUIRE_DIGIT__: { get_param: pw_require_digit }
+            __PW_REQUIRE_UPPER__: { get_param: pw_require_upper }
+            __PW_REQUIRE_SPECIAL__: { get_param: pw_require_special }
 
 
   fip:
