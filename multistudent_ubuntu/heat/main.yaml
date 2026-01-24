@@ -1,4 +1,3 @@
-#clean_ubuntu/heat.yaml
 heat_template_version: 2018-08-31
 
 description: >
@@ -48,7 +47,9 @@ parameters:
 
   pw_min_length:
     type: number
-    default: 12
+    constraints:
+      - range: { min: 4, max: 128 }
+
 
   pw_require_digit:
     type: boolean
@@ -62,8 +63,6 @@ parameters:
     type: boolean
     default: true
 
-
-
 resources:
   secgroup:
     type: OS::Neutron::SecurityGroup
@@ -76,12 +75,14 @@ resources:
           port_range_min: 22
           port_range_max: 22
           remote_ip_prefix: { get_param: ssh_cidr }
+
         - direction: ingress
           ethertype: IPv4
           protocol: tcp
           port_range_min: 80
           port_range_max: 80
           remote_ip_prefix: 0.0.0.0/0
+
         - direction: ingress
           ethertype: IPv4
           protocol: icmp
@@ -110,10 +111,14 @@ resources:
       networks:
         - port: { get_resource: port }
 
+      metadata:
+        dozilab_stack_label: { get_param: stack_label }
+        dozilab_ready_marker: "DOZILAB_READY"
+
       user_data_format: RAW
       user_data:
         str_replace:
-          template: { get_file: cloud-init.yaml }
+          template: { get_file: ../cloud-init/user-data.yaml }
           params:
             __STUDENTS_JSON__: { get_param: students }
             __FORCE_CHANGE__: { get_param: force_password_change }
@@ -124,6 +129,7 @@ resources:
             __PW_REQUIRE_UPPER__: { get_param: pw_require_upper }
             __PW_REQUIRE_SPECIAL__: { get_param: pw_require_special }
 
+            __STACK_LABEL__: { get_param: stack_label }
 
   fip:
     type: OS::Neutron::FloatingIP
@@ -140,6 +146,10 @@ outputs:
   floating_ip:
     value: { get_attr: [fip, floating_ip_address] }
 
+  server_id:
+    description: "Nova server ID (useful for console-log polling)"
+    value: { get_resource: server }
+
   ssh_hint:
     description: "Students login like: ssh <username>@<floating_ip>"
     value:
@@ -148,3 +158,6 @@ outputs:
         params:
           FIP: { get_attr: [fip, floating_ip_address] }
 
+  ready_marker:
+    description: "Backend should wait until this marker appears in the Nova console log"
+    value: "DOZILAB_READY"

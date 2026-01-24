@@ -27,6 +27,7 @@ parameters:
   - name: flavor
     type: string
     default: gp1.small
+    enum: [gp1.small, gp1small, gp1.small]
 
   - name: key_name
     type: string

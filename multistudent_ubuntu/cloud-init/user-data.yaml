@@ -2,12 +2,20 @@
 package_update: true
 package_upgrade: false
 
+packages:
+  - libpam-pwquality
+  - python3
+
 write_files:
   - path: /usr/local/bin/dozilab-multiuser-setup.sh
     permissions: "0755"
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
+
+      LOG="/var/log/dozilab-multiuser.log"
+      MARK_FILE="/var/lib/dozilab/ready"
+      STACK_LABEL="__STACK_LABEL__"
 
       STUDENTS_JSON='__STUDENTS_JSON__'
       FORCE="__FORCE_CHANGE__"
@@ -21,17 +29,10 @@ write_files:
       export STUDENTS_JSON FORCE WORKDIR
       export PW_MIN_LENGTH PW_REQUIRE_DIGIT PW_REQUIRE_UPPER PW_REQUIRE_SPECIAL
 
-      echo "multiuser setup started $(date -Is)" > /var/log/dozilab-multiuser.log
+      mkdir -p /var/lib/dozilab
+      echo "multiuser setup started $(date -Is)" > "$LOG"
 
-      # --- 0) Install pwquality (PAM password policy) ---
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y libpam-pwquality
-
-      # --- 0.1) Render /etc/security/pwquality.conf from Heat params ---
-      # pwquality credits:
-      #  - negative => require that many chars of the class
-      #  - zero/positive => do not require (or "credit" behaviour)
+      # --- pwquality.conf ---
       to_bool() {
         local v="${1:-}"
         v="$(echo "$v" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
@@ -41,60 +42,33 @@ write_files:
       DCREDIT=0
       UCREDIT=0
       OCREDIT=0
-
       if to_bool "$PW_REQUIRE_DIGIT"; then DCREDIT=-1; fi
       if to_bool "$PW_REQUIRE_UPPER"; then UCREDIT=-1; fi
       if to_bool "$PW_REQUIRE_SPECIAL"; then OCREDIT=-1; fi
-
-      # Basic sanity for min length
-      if ! [[ "$PW_MIN_LENGTH" =~ ^[0-9]+$ ]]; then
-        PW_MIN_LENGTH=12
-      fi
+      if ! [[ "$PW_MIN_LENGTH" =~ ^[0-9]+$ ]]; then PW_MIN_LENGTH=12; fi
 
       cat >/etc/security/pwquality.conf <<EOF
       # Managed by DoziLab (cloud-init)
-      #
-      # See: man pwquality.conf, man pam_pwquality
-      #
       minlen = ${PW_MIN_LENGTH}
       dcredit = ${DCREDIT}
       ucredit = ${UCREDIT}
       ocredit = ${OCREDIT}
-      # lcredit = 0   # not required (can be set to -1 if you also want lowercase)
-      #
-      # Optional nice defaults (commented):
-      # difok = 1
-      # maxrepeat = 3
-      # maxclassrepeat = 4
       EOF
 
-      # --- 0.2) Ensure PAM uses pam_pwquality and enforces it also when root sets passwords (chpasswd runs as root) ---
+      # Ensure pam_pwquality active (and enforce_for_root so chpasswd is checked)
       PAM_FILE="/etc/pam.d/common-password"
-
       if grep -qE 'pam_pwquality\.so' "$PAM_FILE"; then
-        # ensure retry=3 exists
         if ! grep -qE 'pam_pwquality\.so.*\bretry=' "$PAM_FILE"; then
           sed -i -E '/pam_pwquality\.so/ s/$/ retry=3/' "$PAM_FILE"
         fi
-        # ensure enforce_for_root exists
         if ! grep -qE 'pam_pwquality\.so.*\benforce_for_root\b' "$PAM_FILE"; then
           sed -i -E '/pam_pwquality\.so/ s/$/ enforce_for_root/' "$PAM_FILE"
         fi
       else
-        # insert before pam_unix password line
         sed -i -E '/^\s*password\s+.*pam_unix\.so/ i password requisite pam_pwquality.so retry=3 enforce_for_root' "$PAM_FILE"
       fi
 
-      # --- 1) Force password auth on Ubuntu cloud image (source of truth) ---
-      if [ -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf ]; then
-        sed -i -E 's/^\s*PasswordAuthentication\s+no\s*$/PasswordAuthentication yes/i' \
-          /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
-
-        if ! grep -qiE '^\s*PasswordAuthentication\s+' /etc/ssh/sshd_config.d/60-cloudimg-settings.conf; then
-          echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
-        fi
-      fi
-
+      # SSH: enable password login
       cat >/etc/ssh/sshd_config.d/99-dozilab-multiuser.conf <<'EOF'
       PasswordAuthentication yes
       KbdInteractiveAuthentication yes
@@ -103,66 +77,46 @@ write_files:
       PermitRootLogin no
       EOF
 
-      # --- 2) Parse JSON mapping username -> password and create users ---
-      # NOTE: Password policy is enforced by PAM/pwquality during `chpasswd`.
+      # Create students
       python3 - <<'PY'
       import json, os, re, sys, subprocess
 
       students_json = os.environ.get("STUDENTS_JSON", "")
-      force = str(os.environ.get("FORCE", "true")).lower() in ("1", "true", "yes", "on")
-      workdir = os.environ.get("WORKDIR", "work")
+      force = str(os.environ.get("FORCE", "true")).lower() in ("1","true","yes","on")
+      workdir = os.environ.get("WORKDIR","work")
 
-      if not students_json.strip():
-          print("students JSON is empty", file=sys.stderr)
-          sys.exit(1)
-
-      try:
-          data = json.loads(students_json)
-      except Exception as e:
-          print(f"students JSON parse error: {e}", file=sys.stderr)
-          sys.exit(1)
-
+      data = json.loads(students_json)
       if not isinstance(data, dict) or not data:
-          print("students must be a non-empty JSON object: {username: password, ...}", file=sys.stderr)
-          sys.exit(1)
+          sys.exit("students must be a non-empty JSON object")
 
       rx = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
-      def run(cmd):
-          subprocess.run(cmd, check=True)
+      def run(cmd, **kw):
+          subprocess.run(cmd, check=True, **kw)
 
       for u, p in data.items():
           if not isinstance(u, str) or not rx.match(u):
-              print(f"Invalid username: {u!r}", file=sys.stderr)
-              sys.exit(1)
+              sys.exit(f"Invalid username: {u!r}")
           if not isinstance(p, str) or len(p) == 0:
-              print(f"Password must be a non-empty string for {u}", file=sys.stderr)
-              sys.exit(1)
+              sys.exit(f"Empty password for {u}")
 
-          # create user if missing
           if subprocess.run(["id", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
               run(["useradd", "-m", "-s", "/bin/bash", u])
 
-          # set password via PAM (pwquality). If policy fails, chpasswd exits non-zero.
-          subprocess.run(["chpasswd"], input=f"{u}:{p}\n", text=True, check=True)
+          run(["chpasswd"], input=f"{u}:{p}\n", text=True)
 
           if force:
               subprocess.run(["chage", "-d", "0", u], check=False)
 
-          # lock down home
           run(["chmod", "700", f"/home/{u}"])
-
-          # workdir + permissions
           run(["mkdir", "-p", f"/home/{u}/{workdir}"])
           run(["chown", "-R", f"{u}:{u}", f"/home/{u}/{workdir}"])
           run(["chmod", "700", f"/home/{u}/{workdir}"])
 
-          # land in workdir on login
           profile = f"/home/{u}/.profile"
           line = f'cd "$HOME/{workdir}"\n'
           try:
-              with open(profile, "r", encoding="utf-8", errors="ignore") as f:
-                  txt = f.read()
+              txt = open(profile, "r", encoding="utf-8", errors="ignore").read()
           except FileNotFoundError:
               txt = ""
           if f'cd "$HOME/{workdir}"' not in txt:
@@ -170,14 +124,18 @@ write_files:
                   f.write(line)
           run(["chown", f"{u}:{u}", profile])
 
-      # AllowUsers ubuntu + all students
       allow = "AllowUsers ubuntu " + " ".join(sorted(data.keys())) + "\n"
       with open("/etc/ssh/sshd_config.d/98-dozilab-allowusers.conf", "w", encoding="utf-8") as f:
           f.write(allow)
       PY
 
-      systemctl restart ssh
-      echo "multiuser setup finished $(date -Is)" >> /var/log/dozilab-multiuser.log
+      systemctl restart ssh || service ssh restart
+
+      echo "multiuser setup finished $(date -Is)" >> "$LOG"
+
+      # READY marker: write a file + write to the VM console (Nova console log)
+      echo "DOZILAB_READY stack=${STACK_LABEL} time=$(date -Is)" | tee -a "$LOG" | tee /dev/console > "$MARK_FILE"
+      chmod 644 "$MARK_FILE"
 
 runcmd:
   - [ bash, -lc, "/usr/local/bin/dozilab-multiuser-setup.sh" ]
