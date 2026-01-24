@@ -1,76 +1,122 @@
 app:
-  name: dozilab-studentvm
-  version: 0.2.0
-  description: "Deploy a student VM with username/password SSH login and workdir landing."
-  owner_team: app-team
+  name: dozilab-multistudent-ubuntu
+  version: 1.0.0
+  title: "DoziLab Multi-Student Ubuntu VM"
+  description: >
+    Deploy one Ubuntu VM with Floating IP and multiple student accounts.
+    SSH password login is enabled for the student users and a ready marker is written to the Nova console log.
+  owner_team: app-team   # TODO: falls euer AppStore ein anderes Feld erwartet (owner / maintainer / team)
 
 artifacts:
-  heat_template: heat.yaml
-  cloud_init: cloud-init.yaml
+  # Heat entrypoint template
+  heat_template: heat/main.yaml
+
+  # NOTE: cloud-init wird NICHT direkt als Artifact benötigt, weil Heat es per get_file lädt:
+  #   template: { get_file: ../cloud-init/user-data.yaml }
+  # Manche AppStores wollen trotzdem alle "Datei-Artefakte" auflisten. Wenn euer System das braucht, aktivieren:
+  # cloud_init: cloud-init/user-data.yaml   # TODO: nur falls euer AppStore das wirklich verlangt
+
+  # NOTE: env.yaml ist optional. Wenn euer AppStore environments unterstützt, ist das praktisch.
+  # environment: env.yaml                   # TODO: aktivieren, falls supported
 
 parameters:
+  # --- OpenStack basics ---
+  - name: image
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+    required: true
+
+  - name: flavor
+    type: string
+    default: "gp1.small"
+    required: true
+    # enum: ["gp1.small"]   # TODO: optional, wenn ihr eine feste Auswahl anbieten wollt
+
   - name: network
     type: string
-    default: NAT
+    default: "NAT"
     required: true
 
   - name: external_network
     type: string
-    default: DHBW
+    default: "DHBW"
     required: true
-
-  - name: image
-    type: string
-    default: "Ubuntu 22.04 2025-01"
-    
-
-  - name: flavor
-    type: string
-    default: gp1.small
-    enum: [gp1.small, gp1small, gp1.small]
 
   - name: key_name
     type: string
-    default: heat-bastion-key
+    default: "heat-bastion-key"
+    required: true
 
   - name: ssh_cidr
     type: string
-    default: 0.0.0.0/0
-
-  - name: student_username
-    type: string
-    default: alice
+    default: "0.0.0.0/0"
     required: true
 
-  - name: student_password
-    type: string
+  # --- Multi-student user map ---
+  - name: students
+    type: json
+    required: true
     secret: true
-    required: true
+    hidden: true
+    description: >
+      JSON object map username -> password.
+      Example: {"alice":"Test1234!","bob":"Test5678!"}
+    # NOTE: Falls euer AppStore kein "json" kann, nehmt type: string und übergebt JSON als String.
+    # TODO: prüfen, was euer AppStore als Parametertypen unterstützt.
 
   - name: force_password_change
     type: boolean
     default: true
+    required: true
 
   - name: workdir
     type: string
-    default: work
-
-  - name: page_title
-    type: string
-    default: "DoziLab – Student VM"
+    default: "work"
+    required: true
+    description: "Directory created under each user's home; user will auto-cd there on login."
 
   - name: stack_label
     type: string
-    default: "studentvm"
+    default: "multistudent"
+    required: true
+    description: "Used for naming/metadata + included in DOZILAB_READY marker."
+
+  # --- Password policy (pam_pwquality) ---
+  - name: pw_min_length
+    type: number
+    default: 12
+    required: true
+    description: "Minimum password length (pam_pwquality minlen)."
+    # NOTE: Heat hat range constraints; AppStore kann ggf. zusätzlich min/max constraints unterstützen.
+    # TODO: falls supported: constraints: { min: 4, max: 128 }
+
+  - name: pw_require_digit
+    type: boolean
+    default: true
+    required: true
+    description: "Require at least one digit (dcredit=-1)."
+
+  - name: pw_require_upper
+    type: boolean
+    default: true
+    required: true
+    description: "Require at least one uppercase (ucredit=-1)."
+
+  - name: pw_require_special
+    type: boolean
+    default: true
+    required: true
+    description: "Require at least one special char (ocredit=-1)."
 
 outputs:
   - name: floating_ip
     from_heat_output: floating_ip
-  - name: student_username
-    from_heat_output: student_username
-  - name: student_ssh
-    from_heat_output: student_ssh
-  - name: admin_ssh
-    from_heat_output: admin_ssh
-  - name: http_url
-    from_heat_output: http_url
+
+  - name: server_id
+    from_heat_output: server_id
+
+  - name: ssh_hint
+    from_heat_output: ssh_hint
+
+  - name: ready_marker
+    from_heat_output: ready_marker
