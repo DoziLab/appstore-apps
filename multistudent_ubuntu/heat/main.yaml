@@ -53,8 +53,7 @@ parameters:
     type: string
     description: 'JSON string map username->password. Example: {"alice":"pw","bob":"pw2"}'
     constraints:
-      - length: { min: 1 }
-
+      - length: { min: 2 }
 
   force_password_change:
     type: boolean
@@ -67,14 +66,12 @@ parameters:
       - allowed_pattern: '^[A-Za-z0-9._-]{1,32}$'
     description: "Work directory under each user's home (e.g. work)."
 
-
   stack_label:
     type: string
     default: "multistudent"
     constraints:
       - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
     description: "Internal label used for resource names/metadata."
-
 
   pw_min_length:
     type: number
@@ -94,12 +91,11 @@ parameters:
     type: boolean
     default: true
 
-
 resources:
   secgroup:
     type: OS::Neutron::SecurityGroup
     properties:
-      description: Allow SSH + HTTP + ICMP
+      description: Allow SSH + ICMP (VPN/Campus only)
       rules:
         - direction: ingress
           ethertype: IPv4
@@ -110,15 +106,8 @@ resources:
 
         - direction: ingress
           ethertype: IPv4
-          protocol: tcp
-          port_range_min: 80
-          port_range_max: 80
-          remote_ip_prefix: 0.0.0.0/0
-
-        - direction: ingress
-          ethertype: IPv4
           protocol: icmp
-          remote_ip_prefix: 0.0.0.0/0
+          remote_ip_prefix: { get_param: ssh_cidr }
 
   port:
     type: OS::Neutron::Port
@@ -192,4 +181,8 @@ outputs:
 
   ready_marker:
     description: "Backend should wait until this marker appears in the Nova console log"
-    value: "DOZILAB_READY"
+    value:
+      str_replace:
+        template: "DOZILAB_READY stack=STACK"
+        params:
+          STACK: { get_param: stack_label }
