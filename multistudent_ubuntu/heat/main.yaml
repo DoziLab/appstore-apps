@@ -38,15 +38,23 @@ parameters:
   key_name:
     type: string
     default: "heat-bastion-key"
+    constraints:
+      - allowed_values: ["heat-bastion-key"]
+    description: "Admin/support SSH keypair (später erweiterbar)"
 
   ssh_cidr:
     type: string
-    default: "0.0.0.0/0"
+    default: "141.72.0.0/16"
+    constraints:
+      - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to SSH (default DHBW/VPN)."
 
   students:
-    type: json
-    description: "Map of username -> password. Example: { alice: 'pw', bob: 'pw2' }"
-    hidden: true
+    type: string
+    description: 'JSON string map username->password. Example: {"alice":"pw","bob":"pw2"}'
+    constraints:
+      - length: { min: 1 }
+
 
   force_password_change:
     type: boolean
@@ -55,16 +63,24 @@ parameters:
   workdir:
     type: string
     default: "work"
+    constraints:
+      - allowed_pattern: '^[A-Za-z0-9._-]{1,32}$'
+    description: "Work directory under each user's home (e.g. work)."
+
 
   stack_label:
     type: string
     default: "multistudent"
+    constraints:
+      - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
+    description: "Internal label used for resource names/metadata."
+
 
   pw_min_length:
     type: number
+    default: 12
     constraints:
       - range: { min: 4, max: 128 }
-
 
   pw_require_digit:
     type: boolean
@@ -77,6 +93,7 @@ parameters:
   pw_require_special:
     type: boolean
     default: true
+
 
 resources:
   secgroup:

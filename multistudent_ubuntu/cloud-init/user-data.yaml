@@ -17,7 +17,7 @@ write_files:
       MARK_FILE="/var/lib/dozilab/ready"
       STACK_LABEL="__STACK_LABEL__"
 
-      STUDENTS_JSON='__STUDENTS_JSON__'
+      STUDENTS_JSON="__STUDENTS_JSON__"
       FORCE="__FORCE_CHANGE__"
       WORKDIR="__WORKDIR__"
 
