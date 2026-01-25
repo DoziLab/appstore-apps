@@ -1,5 +1,6 @@
 app:
-  name: dozilab-multistudent-ubuntu
+  name: multiuser-ubuntu
+  label: Multi-User Ubuntu
   version: 1.0.0
   description: >
     Deploy one Ubuntu VM for a course with multiple local student accounts (username/password),
@@ -16,6 +17,8 @@ artifacts:
 parameters:
   # --- VM basics ---
   - name: stack_label
+    label: Label
+    step: template
     type: string
     default: multistudent
     required: true
@@ -24,6 +27,8 @@ parameters:
       Must match: ^[a-z0-9][a-z0-9-]{0,30}$
 
   - name: image
+    label: Image
+    step: konfiguration
     type: string
     default: "Ubuntu 22.04 2025-01"
     enum:
@@ -34,6 +39,8 @@ parameters:
     description: "Base image for the VM (restricted to known good images)."
 
   - name: flavor
+    label: Flavor
+    step: konfiguration
     type: string
     default: "gp1.small"
     enum:
@@ -44,6 +51,8 @@ parameters:
 
   # --- Access control / networking ---
   - name: ssh_cidr
+    label: SSH erlaubtes Netz (CIDR)
+    step: netzwerk
     type: string
     default: "141.72.0.0/16"
     required: true
@@ -51,22 +60,18 @@ parameters:
       IPv4 CIDR allowed to SSH and ICMP (ping). Default is DHBW/VPN range.
       Examples: 141.72.0.0/16 (VPN/Campus) or 1.2.3.4/32 (single IP).
 
-  # --- Student accounts (secret) ---
-  - name: students
-    type: string
-    secret: true
-    required: true
-    description: >
-      JSON string mapping username -> password.
-      Example: {"alice":"pw","bob":"pw2"} (must use double quotes).
 
   - name: force_password_change
+    label: Passwortwechsel beim ersten Login
+    step: zugriff
     type: boolean
     default: true
     required: true
     description: "If true, student users must change their password on first login."
 
   - name: workdir
+    label: Arbeitsordner
+    step: zugriff
     type: string
     default: "work"
     required: true
@@ -74,24 +79,32 @@ parameters:
 
   # --- Password policy (showcase / configurable in V1) ---
   - name: pw_min_length
+    label: Minimale Passwortlänge
+    step: zugriff
     type: number
     default: 12
     required: true
     description: "Minimum password length enforced via PAM pwquality."
 
   - name: pw_require_digit
+    label: Ziffer erforderlich
+    step: zugriff
     type: boolean
     default: true
     required: true
     description: "Require at least one digit."
 
   - name: pw_require_upper
+    label: Großbuchstabe erforderlich
+    step: zugriff
     type: boolean
     default: true
     required: true
     description: "Require at least one uppercase letter."
 
   - name: pw_require_special
+    label: Sonderzeichen erforderlich
+    step: zugriff
     type: boolean
     default: true
     required: true
@@ -100,18 +113,24 @@ parameters:
   # --- Platform-fixed parameters (not shown in UI) ---
   # Heat enforces allowed_values for these anyway. Keeping them hidden avoids confusion.
   - name: network
+    label: Internes Netzwerk
+    step: netzwerk
     type: string
     default: "NAT"
     hidden: true
     description: "Internal network (fixed)."
 
   - name: external_network
+    label: Externes Netzwerk (Floating IP)
+    step: netzwerk
     type: string
     default: "DHBW"
     hidden: true
     description: "External/FloatingIP network (fixed)."
 
   - name: key_name
+    label: Admin SSH-Key
+    step: zugriff
     type: string
     default: "heat-bastion-key"
     hidden: true
