@@ -1,58 +1,54 @@
-
 heat_template_version: 2018-08-31
-description: PostgreSQL Group DB (Floating IP + SSH tunnel; Postgres localhost only)
+
+description: DoziLab PostgreSQL VM (localhost-only) + optional pgAdmin4 Web UI
 
 parameters:
-  instance_name:
+  stack_label:
     type: string
+    description: Short label used in hostname/log markers
+    default: "sql"
 
   image:
     type: string
-    default: "Ubuntu 22.04 2025-01"
+    description: Glance image name or ID
 
   flavor:
     type: string
-    default: "gp1.small"
+    description: Nova flavor name or ID
 
   network:
     type: string
-    default: "NAT"
+    description: Tenant network name or ID
 
   external_network:
     type: string
-    default: "DHBW"
+    description: External network name or ID for Floating IP
 
-  group_login:
+  key_name:
     type: string
-    constraints:
-      - length: { min: 1, max: 32 }
-
-  group_public_key:
-    type: string
+    description: Nova keypair name for SSH
+    default: "heat-bastion-key"
 
   ssh_cidr:
     type: string
+    description: Allowed CIDR for SSH
     default: "0.0.0.0/0"
 
-  db_name:
+  web_cidr:
     type: string
+    description: Allowed CIDR for pgAdmin over HTTP (port 80)
+    default: "0.0.0.0/0"
 
-  db_user:
+  course_spec_b64:
     type: string
-
-  db_password:
-    type: string
-    hidden: true
-
-  postgres_version:
-    type: number
-    default: 14
+    description: Base64-encoded JSON payload for course provisioning (single line, no newlines)
 
 resources:
   secgroup:
     type: OS::Neutron::SecurityGroup
     properties:
-      description: Allow SSH + ICMP (Postgres via SSH tunnel only)
+      name: { str_replace: { template: "dozilab-pg-__LABEL__", params: { "__LABEL__": { get_param: stack_label } } } }
+      description: Security group for DoziLab Postgres+pgAdmin VM
       rules:
         - direction: ingress
           ethertype: IPv4
@@ -63,37 +59,37 @@ resources:
 
         - direction: ingress
           ethertype: IPv4
-          protocol: icmp
-          remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+          remote_ip_prefix: { get_param: web_cidr }
+
+        # egress allow all (default in many setups; define explicitly to be safe)
+        - direction: egress
+          ethertype: IPv4
 
   port:
     type: OS::Neutron::Port
     properties:
       network: { get_param: network }
-      security_groups:
-        - { get_resource: secgroup }
+      security_groups: [ { get_resource: secgroup } ]
 
   server:
     type: OS::Nova::Server
     properties:
-      name: { get_param: instance_name }
+      name: { str_replace: { template: "dozilab-pg-__LABEL__", params: { "__LABEL__": { get_param: stack_label } } } }
       image: { get_param: image }
       flavor: { get_param: flavor }
-
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: port }
       user_data_format: RAW
       user_data:
         str_replace:
           template: { get_file: ../cloud-init/user-data.yaml }
           params:
-            __GROUP_LOGIN__: { get_param: group_login }
-            __GROUP_PUBKEY__: { get_param: group_public_key }
-            __DB_NAME__: { get_param: db_name }
-            __DB_USER__: { get_param: db_user }
-            __DB_PASS__: { get_param: db_password }
-            __PG_VERSION__: { get_param: postgres_version }
-
-      networks:
-        - port: { get_resource: port }
+            "__STACK_LABEL__": { get_param: stack_label }
+            "__COURSE_SPEC_B64__": { get_param: course_spec_b64 }
 
   fip:
     type: OS::Neutron::FloatingIP
@@ -107,42 +103,50 @@ resources:
       port_id: { get_resource: port }
 
 outputs:
+  ssh_user:
+    description: SSH username
+    value: ubuntu
+
   floating_ip:
     description: Public Floating IP
-    value: { get_attr: [fip, floating_ip_address] }
-
-  ssh_user:
-    description: SSH username for group access
-    value: { get_param: group_login }
-
-  ssh_port:
-    description: SSH port
-    value: 22
+    value: { get_attr: [ fip, floating_ip_address ] }
 
   private_ip:
     description: Private IP on tenant network
-    value: { get_attr: [port, fixed_ips, 0, ip_address] }
-
-  db_name:
-    description: PostgreSQL database name
-    value: { get_param: db_name }
-
-  db_user:
-    description: PostgreSQL username
-    value: { get_param: db_user }
+    value: { get_attr: [ port, fixed_ips, 0, ip_address ] }
 
   server_id:
     description: Nova server ID
     value: { get_resource: server }
 
+  pgadmin_url:
+    description: pgAdmin4 URL (if enabled)
+    value:
+      str_replace:
+        template: "http://__FIP__/pgadmin4/"
+        params:
+          "__FIP__": { get_attr: [ fip, floating_ip_address ] }
+
+  ssh_hint:
+    description: Admin SSH (key-based)
+    value:
+      str_replace:
+        template: "ssh -i ~/.ssh/heat-bastion-key.pem ubuntu@__FIP__"
+        params:
+          "__FIP__": { get_attr: [ fip, floating_ip_address ] }
+
   ssh_tunnel_hint:
     description: How to access Postgres securely via SSH tunnel
     value:
       str_replace:
-        template: "ssh -i <private_key> -L 5432:localhost:5432 USER@FIP  # then: psql -h 127.0.0.1 -p 5432 -U DBUSER DBNAME"
+        template: "ssh -i ~/.ssh/heat-bastion-key.pem -L 5432:127.0.0.1:5432 ubuntu@__FIP__"
         params:
-          USER: { get_param: group_login }
-          FIP: { get_attr: [fip, floating_ip_address] }
-          DBUSER: { get_param: db_user }
-          DBNAME: { get_param: db_name }
+          "__FIP__": { get_attr: [ fip, floating_ip_address ] }
 
+  ready_marker:
+    description: Backend should wait until this marker appears in the Nova console log
+    value:
+      str_replace:
+        template: "DOZILAB_READY stack=__LABEL__"
+        params:
+          "__LABEL__": { get_param: stack_label }

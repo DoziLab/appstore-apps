@@ -2,88 +2,367 @@
 package_update: true
 package_upgrade: false
 
-ssh_pwauth: false
-disable_root: true
-
-users:
-  - default
-  - name: __GROUP_LOGIN__
-    gecos: "Group Login"
-    shell: /bin/bash
-    lock_passwd: true
-    ssh_authorized_keys:
-      - "__GROUP_PUBKEY__"
-
 write_files:
-  - path: /usr/local/bin/dozilab-postgres-init.sh
+  - path: /usr/local/bin/dozilab-postgres-setup.sh
+    owner: root:root
     permissions: "0755"
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
       export DEBIAN_FRONTEND=noninteractive
 
+      LOG="/var/log/dozilab-postgres.log"
+      MARK_DIR="/var/lib/dozilab"
+      READY_FILE="${MARK_DIR}/ready"
+      FAIL_FILE="${MARK_DIR}/failed"
+
       STACK_LABEL="__STACK_LABEL__"
+      COURSE_SPEC_B64="__COURSE_SPEC_B64__"
+
+      mkdir -p "$MARK_DIR"
+      exec > >(tee -a "$LOG") 2>&1
 
       on_fail() {
         rc=$?
         msg="DOZILAB_FAILED stack=${STACK_LABEL} rc=${rc} time=$(date -Is)"
-        echo "$msg" | tee /dev/console
+        echo "$msg" | tee -a "$LOG" | tee /dev/console > "$FAIL_FILE"
+        chmod 644 "$FAIL_FILE" || true
         exit "$rc"
       }
       trap on_fail ERR
 
-      PG_VER="__PG_VERSION__"
-      DB_NAME="__DB_NAME__"
-      DB_USER="__DB_USER__"
-      DB_PASS="__DB_PASS__"
+      echo "DoziLab setup started $(date -Is)"
 
-      echo "Installing PostgreSQL ${PG_VER}..."
+      # ------------------------------------------------------------
+      # Decode course_spec
+      # ------------------------------------------------------------
+      install -d -m 0755 /etc/dozilab
+      echo "$COURSE_SPEC_B64" | tr -d '\n\r ' | base64 -d > /etc/dozilab/course_spec.json
+      chmod 600 /etc/dozilab/course_spec.json
+
+      echo "Validating course_spec.json ..."
+      python3 - <<'PY'
+      import json, re, sys
+      data = json.load(open("/etc/dozilab/course_spec.json"))
+      if not isinstance(data, dict):
+          sys.exit("course_spec must be a JSON object")
+
+      pgver = int(data.get("postgres_version", 14))
+      if pgver < 10 or pgver > 17:
+          sys.exit("postgres_version must be 10..17")
+
+      groups = data.get("groups") or {}
+      users = data.get("users") or {}
+      teacher = data.get("teacher") or {}
+
+      if not isinstance(groups, dict) or not groups:
+          sys.exit("groups must be a non-empty object")
+      if not isinstance(users, dict):
+          sys.exit("users must be an object")
+      if teacher and not isinstance(teacher, dict):
+          sys.exit("teacher must be an object")
+
+      ident = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+
+      for gid, g in groups.items():
+          if not isinstance(g, dict):
+              sys.exit(f"group {gid} must be object")
+          dbn = g.get("db_name")
+          if not isinstance(dbn, str) or not ident.match(dbn):
+              sys.exit(f"group {gid} db_name invalid: {dbn!r}")
+
+      for uid, u in users.items():
+          if not isinstance(u, dict):
+              sys.exit(f"user {uid} must be object")
+          grp = u.get("group")
+          if grp not in groups:
+              sys.exit(f"user {uid} references unknown group {grp!r}")
+          db_user = u.get("db_user") or uid
+          if not ident.match(db_user):
+              sys.exit(f"user {uid} db_user invalid: {db_user!r}")
+          pw = u.get("db_password")
+          if not isinstance(pw, str) or len(pw) < 6:
+              sys.exit(f"user {uid} db_password too short (min 6)")
+
+      if teacher.get("enabled", False):
+          t_user = teacher.get("db_user", "teacher")
+          t_pw = teacher.get("db_password")
+          if not ident.match(t_user):
+              sys.exit("teacher.db_user invalid")
+          if not isinstance(t_pw, str) or len(t_pw) < 6:
+              sys.exit("teacher.db_password too short (min 6)")
+
+      print("course_spec validated OK")
+      PY
+
+      PGVER="$(python3 - <<'PY'
+      import json
+      print(int(json.load(open("/etc/dozilab/course_spec.json")).get("postgres_version", 14)))
+      PY
+      )"
+
+      # ------------------------------------------------------------
+      # Install PostgreSQL
+      # ------------------------------------------------------------
+      echo "Installing PostgreSQL ${PGVER} ..."
       apt-get update -y
-      apt-get install -y "postgresql-${PG_VER}" "postgresql-client-${PG_VER}"
+      apt-get install -y "postgresql-${PGVER}" postgresql-client
 
-      PG_CONF="/etc/postgresql/${PG_VER}/main/postgresql.conf"
-      HBA_CONF="/etc/postgresql/${PG_VER}/main/pg_hba.conf"
+      echo "Configuring Postgres to listen on localhost only ..."
+      CONF="/etc/postgresql/${PGVER}/main/postgresql.conf"
+      HBA="/etc/postgresql/${PGVER}/main/pg_hba.conf"
 
-      sed -i "s/^#\\?listen_addresses\\s*=.*$/listen_addresses = 'localhost'/" "${PG_CONF}"
+      sed -i "s/^#\\?listen_addresses\\s*=.*/listen_addresses = '127.0.0.1'/" "$CONF"
+      grep -qE "^[[:space:]]*host[[:space:]]+all[[:space:]]+all[[:space:]]+127\\.0\\.0\\.1/32" "$HBA" \
+        || echo "host all all 127.0.0.1/32 scram-sha-256" >> "$HBA"
 
-      if ! grep -qE "host\\s+${DB_NAME}\\s+${DB_USER}\\s+127\\.0\\.0\\.1/32\\s+scram-sha-256" "${HBA_CONF}"; then
-        echo "host ${DB_NAME} ${DB_USER} 127.0.0.1/32 scram-sha-256" >> "${HBA_CONF}"
-      fi
-
-      systemctl enable postgresql
+      systemctl enable --now postgresql
       systemctl restart postgresql
 
-      echo "Creating DB/User..."
-      sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
-      DO \$\$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}') THEN
-          CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';
-        ELSE
-          ALTER ROLE ${DB_USER} WITH PASSWORD '${DB_PASS}';
-        END IF;
-      END
-      \$\$
-      ;
-      SQL
+      # Wait until Postgres is ready
+      for i in {1..30}; do
+        if sudo -u postgres psql -d postgres -Atc "SELECT 1" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
 
-      sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
-      DO \$\$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}') THEN
-          CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};
-        END IF;
-      END
-      \$\$
-      ;
-      SQL
+      # ------------------------------------------------------------
+      # Create roles & databases (robust, idempotent)
+      # ------------------------------------------------------------
+      echo "Creating roles & databases ..."
+      python3 - <<'PY'
+      import json, subprocess
 
-      echo "PostgreSQL ready. Access via SSH tunnel only."
+      data = json.load(open("/etc/dozilab/course_spec.json"))
+      groups = data["groups"]
+      users = data.get("users", {})
+      teacher = data.get("teacher", {})
+
+      def run_psql(sql: str) -> str:
+          return subprocess.check_output(
+              ["sudo", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", sql],
+              text=True,
+              cwd="/",
+          ).strip()
+
+      def run_psql0(sql: str) -> None:
+          subprocess.check_call(
+              ["sudo", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", sql],
+              cwd="/",
+          )
+
+      def run_psql_db0(db: str, sql: str) -> None:
+          subprocess.check_call(
+              ["sudo", "-u", "postgres", "psql", "-d", db, "-v", "ON_ERROR_STOP=1", "-Atc", sql],
+              cwd="/",
+          )
+
+      def role_exists(name: str) -> bool:
+          escaped = name.replace("'", "''")
+          return run_psql(f"SELECT 1 FROM pg_roles WHERE rolname='{escaped}';") == "1"
+
+      def db_exists(name: str) -> bool:
+          escaped = name.replace("'", "''")
+          return run_psql(f"SELECT 1 FROM pg_database WHERE datname='{escaped}';") == "1"
+
+      def ensure_group_role(role: str) -> None:
+          if not role_exists(role):
+              run_psql0(f'CREATE ROLE "{role}" NOLOGIN;')
+
+      def ensure_login_role(role: str, password: str) -> None:
+          pw = password.replace("'", "''")
+          if not role_exists(role):
+              run_psql0(f'CREATE ROLE "{role}" LOGIN PASSWORD \'{pw}\';')
+          else:
+              run_psql0(f'ALTER ROLE "{role}" LOGIN PASSWORD \'{pw}\';')
+
+      def ensure_db(dbname: str, owner: str) -> None:
+          if not db_exists(dbname):
+              subprocess.check_call(["sudo", "-u", "postgres", "createdb", "-O", owner, dbname], cwd="/")
+          # set owner & grant (best effort)
+          run_psql0(f'ALTER DATABASE "{dbname}" OWNER TO "{owner}";')
+          run_psql0(f'GRANT ALL PRIVILEGES ON DATABASE "{dbname}" TO "{owner}";')
+
+      def lock_down_db(dbname: str, grp_role: str) -> None:
+          # prevent cross-group access
+          run_psql0(f'REVOKE ALL ON DATABASE "{dbname}" FROM PUBLIC;')
+          run_psql0(f'GRANT CONNECT, TEMPORARY ON DATABASE "{dbname}" TO "{grp_role}";')
+          # schema privileges inside the DB
+          run_psql_db0(dbname, 'REVOKE CREATE ON SCHEMA public FROM PUBLIC;')
+          run_psql_db0(dbname, 'REVOKE USAGE ON SCHEMA public FROM PUBLIC;')
+          run_psql_db0(dbname, f'GRANT USAGE, CREATE ON SCHEMA public TO "{grp_role}";')
+
+      def grant_group_defaults(dbname: str, db_user: str, grp_role: str) -> None:
+          # share objects within the group by default
+          run_psql_db0(
+              dbname,
+              f'ALTER DEFAULT PRIVILEGES FOR ROLE "{db_user}" IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO "{grp_role}";',
+          )
+          run_psql_db0(
+              dbname,
+              f'ALTER DEFAULT PRIVILEGES FOR ROLE "{db_user}" IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO "{grp_role}";',
+          )
+
+      # groups
+      for gid, g in groups.items():
+          grp_role = f"grp_{gid}"
+          dbname = g["db_name"]
+          ensure_group_role(grp_role)
+          ensure_db(dbname, grp_role)
+          lock_down_db(dbname, grp_role)
+
+      # teacher
+      if teacher.get("enabled"):
+          t_user = teacher.get("db_user", "teacher")
+          t_pw = teacher["db_password"]
+          ensure_login_role(t_user, t_pw)
+          for gid in groups.keys():
+              run_psql0(f'GRANT "grp_{gid}" TO "{t_user}";')
+              dbname = groups[gid]["db_name"]
+              grant_group_defaults(dbname, t_user, f"grp_{gid}")
+
+      # students
+      for uid, u in users.items():
+          db_user = u.get("db_user") or uid
+          pw = u["db_password"]
+          gid = u["group"]
+          ensure_login_role(db_user, pw)
+          run_psql0(f'GRANT "grp_{gid}" TO "{db_user}";')
+          dbname = groups[gid]["db_name"]
+          grant_group_defaults(dbname, db_user, f"grp_{gid}")
+
+      print("roles + dbs ensured")
+      PY
+
+      # ------------------------------------------------------------
+      # pgAdmin (optional)
+      # ------------------------------------------------------------
+      PGADMIN_ENABLED="$(python3 - <<'PY'
+      import json
+      print("true" if bool(json.load(open("/etc/dozilab/course_spec.json")).get("pgadmin_enabled", True)) else "false")
+      PY
+      )"
+
+      if [[ "$PGADMIN_ENABLED" == "true" ]]; then
+        echo "Installing pgAdmin4 ..."
+        apt-get install -y curl ca-certificates gnupg apache2 libapache2-mod-wsgi-py3
+        install -d -m 0755 /etc/apt/keyrings
+        curl -fsS https://www.pgadmin.org/static/packages_pgadmin_org.pub | gpg --dearmor -o /etc/apt/keyrings/pgadmin.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/pgadmin.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/jammy pgadmin4 main" > /etc/apt/sources.list.d/pgadmin4.list
+        apt-get update -y
+        apt-get install -y pgadmin4-web
+
+        python3 - <<'PY'
+      import json, sys
+
+      data = json.load(open("/etc/dozilab/course_spec.json"))
+      teacher = data.get("teacher", {}) or {}
+      users = data.get("users", {}) or {}
+
+      email = pw = None
+
+      if teacher.get("enabled"):
+          email = teacher.get("pgadmin_email")
+          pw = teacher.get("pgadmin_password")
+
+      if (not email) or (not pw):
+          for u in users.values():
+              email = u.get("pgadmin_email")
+              pw = u.get("pgadmin_password")
+              if email and pw:
+                  break
+
+      if not email or not pw:
+          sys.exit("pgAdmin credentials missing in course_spec (teacher or first user)")
+
+      bad_suffixes = (".local", ".test", ".example", ".invalid")
+      if ("@" not in email) or any(email.lower().endswith(s) for s in bad_suffixes):
+          sys.exit(f"pgAdmin email invalid: {email!r}")
+      if len(pw) < 6:
+          sys.exit("pgAdmin password too short (min 6 chars)")
+
+      open("/etc/default/pgadmin4", "w").write(
+          f'PGADMIN_SETUP_EMAIL="{email}"\nPGADMIN_SETUP_PASSWORD="{pw}"\n'
+      )
+      print("pgAdmin admin email:", email)
+      PY
+
+        chmod 600 /etc/default/pgadmin4
+        rm -f /var/lib/pgadmin/pgadmin4.db
+        rm -rf /var/lib/pgadmin/sessions /var/lib/pgadmin/storage
+        install -d -m 0750 -o www-data -g www-data /var/lib/pgadmin
+
+        # run setup-web non-interactively by exporting creds
+        set -a
+        source /etc/default/pgadmin4
+        set +a
+        PGADMIN_SETUP_EMAIL="$PGADMIN_SETUP_EMAIL" \
+        PGADMIN_SETUP_PASSWORD="$PGADMIN_SETUP_PASSWORD" \
+          /usr/pgadmin4/bin/setup-web.sh --yes
+        a2enconf pgadmin4 || true
+        systemctl reload apache2 || true
+
+        # create pgAdmin accounts for teacher + all users (idempotent)
+        python3 - <<'PY'
+      import json, subprocess
+
+      spec = json.load(open("/etc/dozilab/course_spec.json"))
+      accounts = []
+
+      teacher = spec.get("teacher") or {}
+      if teacher.get("enabled"):
+          accounts.append((teacher.get("pgadmin_email"), teacher.get("pgadmin_password"), True))
+
+      for u in (spec.get("users") or {}).values():
+          email = u.get("pgadmin_email")
+          pw = u.get("pgadmin_password")
+          if email and pw:
+              accounts.append((email, pw, False))
+
+      # use explicit non-admin role from course_spec (defaults to User in generator)
+      non_admin_role = spec.get("pgadmin_user_role") or "User"
+
+      created = 0
+      for email, pw, is_admin in accounts:
+          if not email or not pw:
+              continue
+          cmd = [
+              "sudo",
+              "-u",
+              "www-data",
+              "/usr/pgadmin4/venv/bin/python",
+              "/usr/pgadmin4/web/setup.py",
+              "add-user",
+              email,
+              pw,
+          ]
+          if is_admin:
+              cmd.append("--admin")
+          else:
+              cmd.extend(["--role", non_admin_role])
+          cmd.append("--active")
+          res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+          out = res.stdout.strip()
+          if res.returncode == 0:
+              created += 1
+              print(f"created pgAdmin user: {email}")
+          elif "already exists" in out.lower():
+              print(f"pgAdmin user already exists: {email}")
+          else:
+              print(f"WARNING: failed to create pgAdmin user {email} rc={res.returncode}\\n{out}")
+
+      print(f"pgAdmin accounts processed: {len(accounts)}, created: {created}")
+      PY
+      fi
 
       msg="DOZILAB_READY stack=${STACK_LABEL} time=$(date -Is)"
-      echo "$msg" | tee /dev/console
+      echo "$msg" | tee /dev/console > "$READY_FILE"
+      chmod 644 "$READY_FILE"
+
+      echo "DoziLab setup finished successfully"
 
 runcmd:
-  - [ bash, -lc, "/usr/local/bin/dozilab-postgres-init.sh" ]
+  - [ bash, -lc, "/usr/local/bin/dozilab-postgres-setup.sh" ]
 
-final_message: "DoziLab Postgres VM: cloud-init finished"
+final_message: "DoziLab Postgres + pgAdmin VM: cloud-init finished"

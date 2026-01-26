@@ -1,73 +1,136 @@
+app:
+  name: postgres-group-db
+  label: PostgreSQL Group DB
+  version: 1.1.0
+  description: >
+    Provision one Ubuntu VM with PostgreSQL (localhost-only) and optional pgAdmin.
+    Creates group databases, student logins, and teacher access. Backend can wait
+    for the DOZILAB_READY marker in the Nova console log.
+  owner_team: dozilab-app-team
 
-id: postgres-group-db
-name: PostgreSQL Group Database
-version: 1.0.0
-description: "Provisioniert pro Gruppe eine Ubuntu-VM mit PostgreSQL. Zugriff erfolgt sicher via SSH-Tunnel (Postgres nur localhost)."
+artifacts:
+  heat_template: heat/main.yaml
+  cloud_init: cloud-init/user-data.yaml
 
+# Parameters exposed to the AppStore UI.
 parameters:
-  instance_name:
+  # --- VM basics ---
+  - name: stack_label
+    label: Label
+    step: template
     type: string
+    default: "sql"
     required: true
-    description: "Eindeutiger Name der Instanz/Stacks (z.B. kursX-grp1-db)."
+    description: >
+      Short course/stack label used in VM name and log markers (e.g. sql-2026-01).
+      Must match: ^[a-z0-9][a-z0-9-]{0,30}$
 
-  image:
+  - name: image
+    label: Image
+    step: konfiguration
     type: string
-    required: true
     default: "Ubuntu 22.04 2025-01"
-    description: "OpenStack Image Name/ID."
-
-  flavor:
-    type: string
+    enum:
+      - "Ubuntu 22.04 2025-01"
+      - "Ubuntu 24.04 2025-01"
+      - "Ubuntu 24.04 2026-01"
     required: true
+    description: "Base image for the VM (restricted to known good images)."
+
+  - name: flavor
+    label: Flavor
+    step: konfiguration
+    type: string
     default: "gp1.small"
-    description: "OpenStack Flavor."
+    enum:
+      - "gp1.small"
+      - "gp1.medium"
+    required: true
+    description: "VM size. Keep small/medium for student workloads."
 
-  network:
+  # --- Access control / networking ---
+  - name: ssh_cidr
+    label: SSH erlaubtes Netz (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: >
+      IPv4 CIDR allowed to SSH. Default is DHBW/VPN range.
+      Examples: 141.72.0.0/16 or 1.2.3.4/32.
+
+  - name: web_cidr
+    label: pgAdmin erlaubtes Netz (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "IPv4 CIDR allowed to reach pgAdmin (HTTP port 80)."
+
+  # --- Provisioning payload ---
+  - name: course_spec_b64
+    label: Course Spec (Base64)
+    step: konfiguration
     type: string
     required: true
+    description: >
+      Base64-encoded JSON for course provisioning (single line, no newlines).
+      See postgres_group_db/README.md for the exact JSON schema.
+
+  # --- Platform-fixed parameters (not shown in UI) ---
+  - name: network
+    label: Internes Netzwerk
+    step: netzwerk
+    type: string
     default: "NAT"
-    description: "Internes Tenant-Netzwerk."
+    hidden: true
+    description: "Internal network (fixed)."
 
-  external_network:
+  - name: external_network
+    label: Externes Netzwerk (Floating IP)
+    step: netzwerk
     type: string
-    required: true
     default: "DHBW"
-    description: "Externes Netzwerk für Floating IPs."
+    hidden: true
+    description: "External/FloatingIP network (fixed)."
 
-  group_login:
+  - name: key_name
+    label: Admin SSH-Key
+    step: zugriff
     type: string
-    required: true
-    description: "Linux Username für Gruppen-Zugang (SSH)."
+    default: "heat-bastion-key"
+    hidden: true
+    description: "Admin/support SSH keypair (fixed)."
 
-  group_public_key:
-    type: string
-    required: true
-    description: "SSH Public Key der Gruppe."
+outputs:
+  - name: ssh_user
+    from_heat_output: ssh_user
+    description: "SSH username (ubuntu)."
 
-  ssh_cidr:
-    type: string
-    required: false
-    default: "0.0.0.0/0"
-    description: "CIDR, von dem aus SSH erreichbar ist (sicherer: deine IP/32)."
+  - name: floating_ip
+    from_heat_output: floating_ip
+    description: "Public floating IP address."
 
-  db_name:
-    type: string
-    required: true
-    description: "Name der PostgreSQL Datenbank."
+  - name: private_ip
+    from_heat_output: private_ip
+    description: "Private IP on tenant network."
 
-  db_user:
-    type: string
-    required: true
-    description: "Name des PostgreSQL Users."
+  - name: server_id
+    from_heat_output: server_id
+    description: "Nova server ID (useful for console-log polling)."
 
-  db_password:
-    type: string
-    required: true
-    description: "Passwort für den PostgreSQL User (kommt vom Backend)."
+  - name: pgadmin_url
+    from_heat_output: pgadmin_url
+    description: "pgAdmin4 URL (if enabled)."
 
-  postgres_version:
-    type: int
-    required: false
-    default: 14
-    description: "PostgreSQL Major-Version (Ubuntu repo)."
+  - name: ssh_hint
+    from_heat_output: ssh_hint
+    description: "Admin SSH command template."
 
+  - name: ssh_tunnel_hint
+    from_heat_output: ssh_tunnel_hint
+    description: "How to access Postgres securely via SSH tunnel."
+
+  - name: ready_marker
+    from_heat_output: ready_marker
+    description: "Marker string that appears in Nova console log when provisioning is done."
