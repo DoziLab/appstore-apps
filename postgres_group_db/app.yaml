@@ -67,15 +67,6 @@ parameters:
     required: true
     description: "IPv4 CIDR allowed to reach pgAdmin (HTTP port 80)."
 
-  # --- Provisioning payload ---
-  - name: course_spec_b64
-    label: Course Spec (Base64)
-    step: konfiguration
-    type: string
-    required: true
-    description: >
-      Base64-encoded JSON for course provisioning (single line, no newlines).
-      See postgres_group_db/README.md for the exact JSON schema.
 
   # --- Platform-fixed parameters (not shown in UI) ---
   - name: network
