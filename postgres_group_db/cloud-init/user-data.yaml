@@ -1,4 +1,3 @@
-
 #cloud-config
 package_update: true
 package_upgrade: false
@@ -23,6 +22,16 @@ write_files:
       set -euo pipefail
       export DEBIAN_FRONTEND=noninteractive
 
+      STACK_LABEL="__STACK_LABEL__"
+
+      on_fail() {
+        rc=$?
+        msg="DOZILAB_FAILED stack=${STACK_LABEL} rc=${rc} time=$(date -Is)"
+        echo "$msg" | tee /dev/console
+        exit "$rc"
+      }
+      trap on_fail ERR
+
       PG_VER="__PG_VERSION__"
       DB_NAME="__DB_NAME__"
       DB_USER="__DB_USER__"
@@ -32,14 +41,11 @@ write_files:
       apt-get update -y
       apt-get install -y "postgresql-${PG_VER}" "postgresql-client-${PG_VER}"
 
-      # Ensure Postgres listens only on localhost (safe default)
       PG_CONF="/etc/postgresql/${PG_VER}/main/postgresql.conf"
       HBA_CONF="/etc/postgresql/${PG_VER}/main/pg_hba.conf"
 
       sed -i "s/^#\\?listen_addresses\\s*=.*$/listen_addresses = 'localhost'/" "${PG_CONF}"
 
-      # Ensure local auth is allowed
-      # Keep defaults, but we ensure password auth for local connections to the created user
       if ! grep -qE "host\\s+${DB_NAME}\\s+${DB_USER}\\s+127\\.0\\.0\\.1/32\\s+scram-sha-256" "${HBA_CONF}"; then
         echo "host ${DB_NAME} ${DB_USER} 127.0.0.1/32 scram-sha-256" >> "${HBA_CONF}"
       fi
@@ -48,7 +54,6 @@ write_files:
       systemctl restart postgresql
 
       echo "Creating DB/User..."
-      # Create user (idempotent-ish)
       sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
       DO \$\$
       BEGIN
@@ -62,7 +67,6 @@ write_files:
       ;
       SQL
 
-      # Create database owned by user if not exists
       sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
       DO \$\$
       BEGIN
@@ -76,6 +80,10 @@ write_files:
 
       echo "PostgreSQL ready. Access via SSH tunnel only."
 
-runcmd:
-  - /usr/local/bin/dozilab-postgres-init.sh
+      msg="DOZILAB_READY stack=${STACK_LABEL} time=$(date -Is)"
+      echo "$msg" | tee /dev/console
 
+runcmd:
+  - [ bash, -lc, "/usr/local/bin/dozilab-postgres-init.sh" ]
+
+final_message: "DoziLab Postgres VM: cloud-init finished"
