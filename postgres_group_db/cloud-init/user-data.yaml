@@ -3,6 +3,12 @@ package_update: true
 package_upgrade: false
 
 write_files:
+  - path: /etc/dozilab/user.json
+    owner: root:root
+    permissions: "0600"
+    content: |
+      __USER_JSON__
+
   - path: /usr/local/bin/dozilab-postgres-setup.sh
     owner: root:root
     permissions: "0755"
@@ -17,7 +23,7 @@ write_files:
       FAIL_FILE="${MARK_DIR}/failed"
 
       STACK_LABEL="__STACK_LABEL__"
-      COURSE_SPEC_B64="__COURSE_SPEC_B64__"
+      USER_JSON_PATH="/etc/dozilab/user.json"
 
       mkdir -p "$MARK_DIR"
       exec > >(tee -a "$LOG") 2>&1
@@ -32,95 +38,184 @@ write_files:
       trap on_fail ERR
 
       echo "DoziLab setup started $(date -Is)"
+      echo "Stack label: ${STACK_LABEL}"
+      echo "Using user_json: ${USER_JSON_PATH}"
+
+      if [[ ! -s "$USER_JSON_PATH" ]]; then
+        echo "ERROR: $USER_JSON_PATH missing/empty" >&2
+        exit 2
+      fi
 
       # ------------------------------------------------------------
-      # Decode course_spec
+      # Validate payload (NO normalization, NO sanitizing, NO fallback)
+      # Backend must send final db_user + database_name etc.
       # ------------------------------------------------------------
-      install -d -m 0755 /etc/dozilab
-      echo "$COURSE_SPEC_B64" | tr -d '\n\r ' | base64 -d > /etc/dozilab/course_spec.json
-      chmod 600 /etc/dozilab/course_spec.json
-
-      echo "Validating course_spec.json ..."
+      echo "Validating user_json schema (direct) ..."
       python3 - <<'PY'
       import json, re, sys
-      data = json.load(open("/etc/dozilab/course_spec.json"))
+
+      p = "/etc/dozilab/user.json"
+      data = json.load(open(p, "r", encoding="utf-8"))
       if not isinstance(data, dict):
-          sys.exit("course_spec must be a JSON object")
+          sys.exit("user_json must be an object")
 
-      pgver = int(data.get("postgres_version", 14))
-      if pgver < 10 or pgver > 17:
-          sys.exit("postgres_version must be 10..17")
+      apps = data.get("applications")
+      if not isinstance(apps, list):
+          sys.exit("user_json.applications must be a list")
 
-      groups = data.get("groups") or {}
-      users = data.get("users") or {}
-      teacher = data.get("teacher") or {}
+      def find_app(name: str):
+          for a in apps:
+              if isinstance(a, dict) and str(a.get("name","")).lower() == name:
+                  return a
+          return None
 
-      if not isinstance(groups, dict) or not groups:
-          sys.exit("groups must be a non-empty object")
-      if not isinstance(users, dict):
-          sys.exit("users must be an object")
-      if teacher and not isinstance(teacher, dict):
-          sys.exit("teacher must be an object")
+      pg = find_app("postgres") or find_app("postgresql")
+      if not pg:
+          sys.exit("Missing applications[name=postgres]")
 
+      pg_creds = pg.get("credentials")
+      if not isinstance(pg_creds, list) or not pg_creds:
+          sys.exit("postgres.credentials must be a non-empty list")
+
+      # strict identifiers to avoid surprises
       ident = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+      group_token = re.compile(r"^[A-Za-z0-9_]{1,32}$")
 
-      for gid, g in groups.items():
-          if not isinstance(g, dict):
-              sys.exit(f"group {gid} must be object")
-          dbn = g.get("db_name")
+      used_db_users = set()
+
+      for c in pg_creds:
+          if not isinstance(c, dict):
+              sys.exit("postgres.credentials entries must be objects")
+
+          gid = c.get("group")
+          if gid is None:
+              sys.exit("postgres credential missing group")
+          gid_s = str(gid).strip()
+          if not gid_s or not group_token.match(gid_s):
+              sys.exit(f"postgres credential group must be [A-Za-z0-9_], 1..32 chars, got: {gid!r}")
+
+          dbn = c.get("database_name") or c.get("db_name")
           if not isinstance(dbn, str) or not ident.match(dbn):
-              sys.exit(f"group {gid} db_name invalid: {dbn!r}")
+              sys.exit(f"postgres credential database_name invalid (must match {ident.pattern}): {dbn!r}")
 
-      for uid, u in users.items():
-          if not isinstance(u, dict):
-              sys.exit(f"user {uid} must be object")
-          grp = u.get("group")
-          if grp not in groups:
-              sys.exit(f"user {uid} references unknown group {grp!r}")
-          db_user = u.get("db_user") or uid
-          if not ident.match(db_user):
-              sys.exit(f"user {uid} db_user invalid: {db_user!r}")
-          pw = u.get("db_password")
+          db_user = c.get("db_user")
+          if not isinstance(db_user, str) or not ident.match(db_user):
+              sys.exit(f"postgres credential db_user invalid (must match {ident.pattern}): {db_user!r}")
+
+          if db_user in used_db_users:
+              sys.exit(f"duplicate postgres db_user not allowed: {db_user!r}")
+          used_db_users.add(db_user)
+
+          pw = c.get("password")
           if not isinstance(pw, str) or len(pw) < 6:
-              sys.exit(f"user {uid} db_password too short (min 6)")
+              sys.exit(f"postgres credential password too short for {db_user!r} (min 6)")
 
-      if teacher.get("enabled", False):
-          t_user = teacher.get("db_user", "teacher")
-          t_pw = teacher.get("db_password")
-          if not ident.match(t_user):
-              sys.exit("teacher.db_user invalid")
-          if not isinstance(t_pw, str) or len(t_pw) < 6:
-              sys.exit("teacher.db_password too short (min 6)")
+      admin = pg.get("admin_credentials") or {}
+      if admin:
+          if not isinstance(admin, dict):
+              sys.exit("postgres.admin_credentials must be an object")
+          a_user = admin.get("db_user")
+          a_pw = admin.get("password")
+          if not isinstance(a_user, str) or not ident.match(a_user):
+              sys.exit(f"postgres admin db_user invalid (must match {ident.pattern}): {a_user!r}")
+          if a_user in used_db_users:
+              sys.exit(f"postgres admin db_user collides with group user: {a_user!r}")
+          if not isinstance(a_pw, str) or len(a_pw) < 6:
+              sys.exit("postgres admin password too short (min 6)")
 
-      print("course_spec validated OK")
+      # pgadmin is optional; if present we validate only what it explicitly sends (no fallback)
+      pga = find_app("pgadmin")
+      if pga:
+          pga_admin = pga.get("admin_credentials") or {}
+          if not isinstance(pga_admin, dict) or not pga_admin.get("email") or not pga_admin.get("password"):
+              sys.exit("pgadmin.admin_credentials must contain email+password when pgadmin app is present")
+
+          pga_creds = pga.get("credentials")
+          if not isinstance(pga_creds, list) or not pga_creds:
+              sys.exit("pgadmin.credentials must be a non-empty list when pgadmin app is present")
+
+          seen_emails = set()
+          for c in pga_creds:
+              if not isinstance(c, dict):
+                  sys.exit("pgadmin.credentials entries must be objects")
+              gid = c.get("group")
+              if gid is None:
+                  sys.exit("pgadmin credential missing group")
+              gid_s = str(gid).strip()
+              if not gid_s or not group_token.match(gid_s):
+                  sys.exit(f"pgadmin credential group must be [A-Za-z0-9_], got: {gid!r}")
+
+              email = c.get("email")
+              pw = c.get("password")
+              if not isinstance(email, str) or "@" not in email:
+                  sys.exit(f"pgadmin credential email invalid: {email!r}")
+              if not isinstance(pw, str) or len(pw) < 6:
+                  sys.exit(f"pgadmin credential password too short for {email!r} (min 6)")
+              if email in seen_emails:
+                  sys.exit(f"duplicate pgadmin email not allowed: {email!r}")
+              seen_emails.add(email)
+
+      print("user_json validated OK (direct mode)")
       PY
-
-      PGVER="$(python3 - <<'PY'
-      import json
-      print(int(json.load(open("/etc/dozilab/course_spec.json")).get("postgres_version", 14)))
-      PY
-      )"
 
       # ------------------------------------------------------------
       # Install PostgreSQL
+      # - If user_json contains postgres_version -> install that major
+      # - else install distro default (postgresql meta)
       # ------------------------------------------------------------
-      echo "Installing PostgreSQL ${PGVER} ..."
+      PGVER="$(python3 - <<'PY'
+      import json
+      data = json.load(open("/etc/dozilab/user.json"))
+      pgver = data.get("postgres_version")
+      if pgver is None:
+          pgver = data.get("postgresVersion")
+      apps = data.get("applications") or []
+      for a in apps:
+          if isinstance(a, dict) and str(a.get("name","")).lower() in ("postgres","postgresql"):
+              if a.get("postgres_version") is not None:
+                  pgver = a.get("postgres_version")
+              if a.get("postgresVersion") is not None:
+                  pgver = a.get("postgresVersion")
+      if pgver is None:
+          print("")
+      else:
+          print(int(pgver))
+      PY
+      )"
+
       apt-get update -y
-      apt-get install -y "postgresql-${PGVER}" postgresql-client
+      if [[ -n "${PGVER}" ]]; then
+        echo "Installing PostgreSQL ${PGVER} ..."
+        apt-get install -y "postgresql-${PGVER}" postgresql-client
+      else
+        echo "Installing distro default PostgreSQL ..."
+        apt-get install -y postgresql postgresql-client
+      fi
+
+      # Detect installed major version
+      DETECTED_PGVER="$(pg_lsclusters --no-header 2>/dev/null | awk 'NR==1{print $1}')"
+      if [[ -z "${DETECTED_PGVER:-}" ]]; then
+        echo "ERROR: Could not detect Postgres version (pg_lsclusters empty)" >&2
+        exit 3
+      fi
+      PGVER="${DETECTED_PGVER}"
+      echo "Detected PostgreSQL major version: ${PGVER}"
 
       echo "Configuring Postgres to listen on localhost only ..."
       CONF="/etc/postgresql/${PGVER}/main/postgresql.conf"
       HBA="/etc/postgresql/${PGVER}/main/pg_hba.conf"
 
       sed -i "s/^#\\?listen_addresses\\s*=.*/listen_addresses = '127.0.0.1'/" "$CONF"
+
       grep -qE "^[[:space:]]*host[[:space:]]+all[[:space:]]+all[[:space:]]+127\\.0\\.0\\.1/32" "$HBA" \
         || echo "host all all 127.0.0.1/32 scram-sha-256" >> "$HBA"
+      grep -qE "^[[:space:]]*host[[:space:]]+all[[:space:]]+all[[:space:]]+::1/128" "$HBA" \
+        || echo "host all all ::1/128 scram-sha-256" >> "$HBA"
 
       systemctl enable --now postgresql
       systemctl restart postgresql
 
-      # Wait until Postgres is ready
-      for i in {1..30}; do
+      for i in {1..60}; do
         if sudo -u postgres psql -d postgres -Atc "SELECT 1" >/dev/null 2>&1; then
           break
         fi
@@ -128,123 +223,160 @@ write_files:
       done
 
       # ------------------------------------------------------------
-      # Create roles & databases (robust, idempotent)
+      # Provision DB roles & databases from user_json DIRECTLY
+      # (robust quoting; no psql :var substitution)
       # ------------------------------------------------------------
-      echo "Creating roles & databases ..."
+      echo "Provisioning roles & databases (direct from user_json) ..."
       python3 - <<'PY'
-      import json, subprocess
+      import json, subprocess, sys, re
 
-      data = json.load(open("/etc/dozilab/course_spec.json"))
-      groups = data["groups"]
-      users = data.get("users", {})
-      teacher = data.get("teacher", {})
+      spec = json.load(open("/etc/dozilab/user.json"))
+      apps = spec.get("applications") or []
 
-      def run_psql(sql: str) -> str:
-          return subprocess.check_output(
-              ["sudo", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", sql],
-              text=True,
-              cwd="/",
-          ).strip()
+      def find_app(name: str):
+          for a in apps:
+              if isinstance(a, dict) and str(a.get("name","")).lower() == name:
+                  return a
+          return None
 
-      def run_psql0(sql: str) -> None:
-          subprocess.check_call(
-              ["sudo", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", sql],
-              cwd="/",
-          )
+      pg = find_app("postgres") or find_app("postgresql")
+      pg_creds = pg.get("credentials") or []
+      pg_admin = pg.get("admin_credentials") or {}
 
-      def run_psql_db0(db: str, sql: str) -> None:
-          subprocess.check_call(
-              ["sudo", "-u", "postgres", "psql", "-d", db, "-v", "ON_ERROR_STOP=1", "-Atc", sql],
-              cwd="/",
-          )
+      ident = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+      group_token = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+
+      def run(sql: str, db: str = "postgres", capture: bool = True) -> str:
+          cmd = ["sudo", "-u", "postgres", "psql", "-d", db, "-v", "ON_ERROR_STOP=1", "-Atc", sql]
+          if capture:
+              return subprocess.check_output(cmd, text=True, cwd="/").strip()
+          subprocess.check_call(cmd, cwd="/")
+          return ""
+
+      def q_ident(s: str) -> str:
+          return '"' + s.replace('"', '""') + '"'
+
+      def q_lit(s: str) -> str:
+          return "'" + s.replace("'", "''") + "'"
 
       def role_exists(name: str) -> bool:
-          escaped = name.replace("'", "''")
-          return run_psql(f"SELECT 1 FROM pg_roles WHERE rolname='{escaped}';") == "1"
+          return run(f"SELECT 1 FROM pg_roles WHERE rolname={q_lit(name)};") == "1"
 
       def db_exists(name: str) -> bool:
-          escaped = name.replace("'", "''")
-          return run_psql(f"SELECT 1 FROM pg_database WHERE datname='{escaped}';") == "1"
+          return run(f"SELECT 1 FROM pg_database WHERE datname={q_lit(name)};") == "1"
 
       def ensure_group_role(role: str) -> None:
           if not role_exists(role):
-              run_psql0(f'CREATE ROLE "{role}" NOLOGIN;')
+              run(f"CREATE ROLE {q_ident(role)} NOLOGIN;", capture=False)
 
       def ensure_login_role(role: str, password: str) -> None:
-          pw = password.replace("'", "''")
           if not role_exists(role):
-              run_psql0(f'CREATE ROLE "{role}" LOGIN PASSWORD \'{pw}\';')
+              run(f"CREATE ROLE {q_ident(role)} LOGIN PASSWORD {q_lit(password)};", capture=False)
           else:
-              run_psql0(f'ALTER ROLE "{role}" LOGIN PASSWORD \'{pw}\';')
+              run(f"ALTER ROLE {q_ident(role)} LOGIN PASSWORD {q_lit(password)};", capture=False)
 
       def ensure_db(dbname: str, owner: str) -> None:
           if not db_exists(dbname):
-              subprocess.check_call(["sudo", "-u", "postgres", "createdb", "-O", owner, dbname], cwd="/")
-          # set owner & grant (best effort)
-          run_psql0(f'ALTER DATABASE "{dbname}" OWNER TO "{owner}";')
-          run_psql0(f'GRANT ALL PRIVILEGES ON DATABASE "{dbname}" TO "{owner}";')
+              run(f"CREATE DATABASE {q_ident(dbname)} OWNER {q_ident(owner)};", capture=False)
+          run(f"ALTER DATABASE {q_ident(dbname)} OWNER TO {q_ident(owner)};", capture=False)
 
       def lock_down_db(dbname: str, grp_role: str) -> None:
-          # prevent cross-group access
-          run_psql0(f'REVOKE ALL ON DATABASE "{dbname}" FROM PUBLIC;')
-          run_psql0(f'GRANT CONNECT, TEMPORARY ON DATABASE "{dbname}" TO "{grp_role}";')
-          # schema privileges inside the DB
-          run_psql_db0(dbname, 'REVOKE CREATE ON SCHEMA public FROM PUBLIC;')
-          run_psql_db0(dbname, 'REVOKE USAGE ON SCHEMA public FROM PUBLIC;')
-          run_psql_db0(dbname, f'GRANT USAGE, CREATE ON SCHEMA public TO "{grp_role}";')
+          run(f"REVOKE ALL ON DATABASE {q_ident(dbname)} FROM PUBLIC;", capture=False)
+          run(f"GRANT CONNECT, TEMPORARY ON DATABASE {q_ident(dbname)} TO {q_ident(grp_role)};", capture=False)
+          run("REVOKE CREATE ON SCHEMA public FROM PUBLIC;", db=dbname, capture=False)
+          run("REVOKE USAGE ON SCHEMA public FROM PUBLIC;", db=dbname, capture=False)
+          run(f"GRANT USAGE, CREATE ON SCHEMA public TO {q_ident(grp_role)};", db=dbname, capture=False)
 
-      def grant_group_defaults(dbname: str, db_user: str, grp_role: str) -> None:
-          # share objects within the group by default
-          run_psql_db0(
-              dbname,
-              f'ALTER DEFAULT PRIVILEGES FOR ROLE "{db_user}" IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO "{grp_role}";',
+      def grant_group_defaults(dbname: str, creator_role: str, grp_role: str) -> None:
+          run(
+              f"ALTER DEFAULT PRIVILEGES FOR ROLE {q_ident(creator_role)} IN SCHEMA public "
+              f"GRANT ALL PRIVILEGES ON TABLES TO {q_ident(grp_role)};",
+              db=dbname,
+              capture=False,
           )
-          run_psql_db0(
-              dbname,
-              f'ALTER DEFAULT PRIVILEGES FOR ROLE "{db_user}" IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO "{grp_role}";',
+          run(
+              f"ALTER DEFAULT PRIVILEGES FOR ROLE {q_ident(creator_role)} IN SCHEMA public "
+              f"GRANT ALL PRIVILEGES ON SEQUENCES TO {q_ident(grp_role)};",
+              db=dbname,
+              capture=False,
           )
 
-      # groups
-      for gid, g in groups.items():
+      def grant_role(grp_role: str, user: str) -> None:
+          run(f"GRANT {q_ident(grp_role)} TO {q_ident(user)};", capture=False)
+
+      # Build group map (DIRECT): group -> {dbname, db_user, password}
+      groups = {}
+      for c in pg_creds:
+          gid = str(c.get("group")).strip()
+          if not gid or not group_token.match(gid):
+              sys.exit(f"Invalid group token: {gid!r}")
+
+          dbname = c.get("database_name") or c.get("db_name")
+          db_user = c.get("db_user")
+          pw = c.get("password")
+
+          if not isinstance(dbname, str) or not ident.match(dbname):
+              sys.exit(f"Invalid database_name for group {gid}: {dbname!r}")
+          if not isinstance(db_user, str) or not ident.match(db_user):
+              sys.exit(f"Invalid db_user for group {gid}: {db_user!r}")
+          if not isinstance(pw, str) or len(pw) < 6:
+              sys.exit(f"Invalid password for db_user {db_user!r} (min 6)")
+
+          if gid in groups:
+              sys.exit(f"Duplicate group in postgres.credentials: {gid!r}")
+          groups[gid] = {"dbname": dbname, "db_user": db_user, "password": pw}
+
+      # 1) group roles + dbs
+      for gid, info in groups.items():
           grp_role = f"grp_{gid}"
-          dbname = g["db_name"]
           ensure_group_role(grp_role)
-          ensure_db(dbname, grp_role)
-          lock_down_db(dbname, grp_role)
+          ensure_db(info["dbname"], grp_role)
+          lock_down_db(info["dbname"], grp_role)
 
-      # teacher
-      if teacher.get("enabled"):
-          t_user = teacher.get("db_user", "teacher")
-          t_pw = teacher["db_password"]
-          ensure_login_role(t_user, t_pw)
-          for gid in groups.keys():
-              run_psql0(f'GRANT "grp_{gid}" TO "{t_user}";')
-              dbname = groups[gid]["db_name"]
-              grant_group_defaults(dbname, t_user, f"grp_{gid}")
+      # 2) group login users
+      for gid, info in groups.items():
+          grp_role = f"grp_{gid}"
+          db_user = info["db_user"]
+          ensure_login_role(db_user, info["password"])
+          grant_role(grp_role, db_user)
+          grant_group_defaults(info["dbname"], db_user, grp_role)
 
-      # students
-      for uid, u in users.items():
-          db_user = u.get("db_user") or uid
-          pw = u["db_password"]
-          gid = u["group"]
-          ensure_login_role(db_user, pw)
-          run_psql0(f'GRANT "grp_{gid}" TO "{db_user}";')
-          dbname = groups[gid]["db_name"]
-          grant_group_defaults(dbname, db_user, f"grp_{gid}")
+      # 3) optional admin (teacher)
+      if isinstance(pg_admin, dict) and pg_admin:
+          a_user = pg_admin.get("db_user")
+          a_pw = pg_admin.get("password")
+          if a_user and a_pw:
+              if not isinstance(a_user, str) or not ident.match(a_user):
+                  sys.exit(f"Invalid postgres admin db_user: {a_user!r}")
+              if not isinstance(a_pw, str) or len(a_pw) < 6:
+                  sys.exit("Invalid postgres admin password (min 6)")
+              ensure_login_role(a_user, a_pw)
+              for gid, info in groups.items():
+                  grp_role = f"grp_{gid}"
+                  grant_role(grp_role, a_user)
+                  grant_group_defaults(info["dbname"], a_user, grp_role)
 
-      print("roles + dbs ensured")
+      print(f"Provisioned groups: {len(groups)}")
       PY
 
       # ------------------------------------------------------------
-      # pgAdmin (optional)
+      # pgAdmin (optional; only if applications includes pgadmin)
+      # NO fallback, NO deriving from postgres.
       # ------------------------------------------------------------
-      PGADMIN_ENABLED="$(python3 - <<'PY'
+      PGADMIN_PRESENT="$(python3 - <<'PY'
       import json
-      print("true" if bool(json.load(open("/etc/dozilab/course_spec.json")).get("pgadmin_enabled", True)) else "false")
+      spec = json.load(open("/etc/dozilab/user.json"))
+      apps = spec.get("applications") or []
+      def find(name):
+          for a in apps:
+              if isinstance(a, dict) and str(a.get("name","")).lower() == name:
+                  return True
+          return False
+      print("true" if find("pgadmin") else "false")
       PY
       )"
 
-      if [[ "$PGADMIN_ENABLED" == "true" ]]; then
+      if [[ "$PGADMIN_PRESENT" == "true" ]]; then
         echo "Installing pgAdmin4 ..."
         apt-get install -y curl ca-certificates gnupg apache2 libapache2-mod-wsgi-py3
         install -d -m 0755 /etc/apt/keyrings
@@ -253,34 +385,30 @@ write_files:
         apt-get update -y
         apt-get install -y pgadmin4-web
 
+        echo "Configuring pgAdmin admin account (direct) ..."
         python3 - <<'PY'
       import json, sys
 
-      data = json.load(open("/etc/dozilab/course_spec.json"))
-      teacher = data.get("teacher", {}) or {}
-      users = data.get("users", {}) or {}
+      spec = json.load(open("/etc/dozilab/user.json"))
+      apps = spec.get("applications") or []
 
-      email = pw = None
+      def get_app(name):
+          for a in apps:
+              if isinstance(a, dict) and str(a.get("name","")).lower() == name:
+                  return a
+          return None
 
-      if teacher.get("enabled"):
-          email = teacher.get("pgadmin_email")
-          pw = teacher.get("pgadmin_password")
-
-      if (not email) or (not pw):
-          for u in users.values():
-              email = u.get("pgadmin_email")
-              pw = u.get("pgadmin_password")
-              if email and pw:
-                  break
+      pga = get_app("pgadmin") or {}
+      admin = pga.get("admin_credentials") or {}
+      email = admin.get("email")
+      pw = admin.get("password")
 
       if not email or not pw:
-          sys.exit("pgAdmin credentials missing in course_spec (teacher or first user)")
-
-      bad_suffixes = (".local", ".test", ".example", ".invalid")
-      if ("@" not in email) or any(email.lower().endswith(s) for s in bad_suffixes):
-          sys.exit(f"pgAdmin email invalid: {email!r}")
+          sys.exit("pgadmin.admin_credentials missing email/password")
+      if "@" not in email:
+          sys.exit(f"pgAdmin admin email invalid: {email!r}")
       if len(pw) < 6:
-          sys.exit("pgAdmin password too short (min 6 chars)")
+          sys.exit("pgAdmin admin password too short (min 6)")
 
       open("/etc/default/pgadmin4", "w").write(
           f'PGADMIN_SETUP_EMAIL="{email}"\nPGADMIN_SETUP_PASSWORD="{pw}"\n'
@@ -293,40 +421,50 @@ write_files:
         rm -rf /var/lib/pgadmin/sessions /var/lib/pgadmin/storage
         install -d -m 0750 -o www-data -g www-data /var/lib/pgadmin
 
-        # run setup-web non-interactively by exporting creds
         set -a
         source /etc/default/pgadmin4
         set +a
         PGADMIN_SETUP_EMAIL="$PGADMIN_SETUP_EMAIL" \
         PGADMIN_SETUP_PASSWORD="$PGADMIN_SETUP_PASSWORD" \
           /usr/pgadmin4/bin/setup-web.sh --yes
+
         a2enconf pgadmin4 || true
         systemctl reload apache2 || true
 
-        # create pgAdmin accounts for teacher + all users (idempotent)
+        echo "Creating pgAdmin users (direct from pgadmin.credentials) ..."
         python3 - <<'PY'
-      import json, subprocess
+      import json, subprocess, sys
 
-      spec = json.load(open("/etc/dozilab/course_spec.json"))
+      spec = json.load(open("/etc/dozilab/user.json"))
+      apps = spec.get("applications") or []
+
+      def get_app(name):
+          for a in apps:
+              if isinstance(a, dict) and str(a.get("name","")).lower() == name:
+                  return a
+          return None
+
+      pga = get_app("pgadmin") or {}
+      creds = pga.get("credentials") or []
+      if not isinstance(creds, list):
+          sys.exit("pgadmin.credentials must be a list")
+
       accounts = []
-
-      teacher = spec.get("teacher") or {}
-      if teacher.get("enabled"):
-          accounts.append((teacher.get("pgadmin_email"), teacher.get("pgadmin_password"), True))
-
-      for u in (spec.get("users") or {}).values():
-          email = u.get("pgadmin_email")
-          pw = u.get("pgadmin_password")
-          if email and pw:
-              accounts.append((email, pw, False))
-
-      # use explicit non-admin role from course_spec (defaults to User in generator)
-      non_admin_role = spec.get("pgadmin_user_role") or "User"
-
-      created = 0
-      for email, pw, is_admin in accounts:
+      seen = set()
+      for c in creds:
+          if not isinstance(c, dict):
+              continue
+          email = c.get("email")
+          pw = c.get("password")
           if not email or not pw:
               continue
+          if email in seen:
+              continue
+          seen.add(email)
+          accounts.append((email, pw))
+
+      created = 0
+      for email, pw in accounts:
           cmd = [
               "sudo",
               "-u",
@@ -336,21 +474,19 @@ write_files:
               "add-user",
               email,
               pw,
+              "--role",
+              "User",
+              "--active",
           ]
-          if is_admin:
-              cmd.append("--admin")
-          else:
-              cmd.extend(["--role", non_admin_role])
-          cmd.append("--active")
           res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-          out = res.stdout.strip()
+          out = (res.stdout or "").strip()
           if res.returncode == 0:
               created += 1
               print(f"created pgAdmin user: {email}")
           elif "already exists" in out.lower():
               print(f"pgAdmin user already exists: {email}")
           else:
-              print(f"WARNING: failed to create pgAdmin user {email} rc={res.returncode}\\n{out}")
+              print(f"WARNING: failed to create pgAdmin user {email} rc={res.returncode}\n{out}")
 
       print(f"pgAdmin accounts processed: {len(accounts)}, created: {created}")
       PY

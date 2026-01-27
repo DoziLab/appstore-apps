@@ -39,9 +39,9 @@ parameters:
     description: Allowed CIDR for pgAdmin over HTTP (port 80)
     default: "0.0.0.0/0"
 
-  course_spec_b64:
+  user_json:
     type: string
-    description: Base64-encoded JSON payload for course provisioning (single line, no newlines)
+    description: Raw JSON payload from backend (multi-line allowed)
 
 resources:
   secgroup:
@@ -89,7 +89,11 @@ resources:
           template: { get_file: ../cloud-init/user-data.yaml }
           params:
             "__STACK_LABEL__": { get_param: stack_label }
-            "__COURSE_SPEC_B64__": { get_param: course_spec_b64 }
+            "__USER_JSON__":
+              str_replace:
+                template: { get_param: user_json }
+                params:
+                  "\n": "\n      "
 
   fip:
     type: OS::Neutron::FloatingIP
