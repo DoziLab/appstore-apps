@@ -2,6 +2,7 @@ heat_template_version: 2018-08-31
 
 description: >
   DoziLab Multi-Student VM: Ubuntu VM + Floating IP + password SSH for multiple users.
+  Root disk is provisioned as a Cinder volume (Boot from Volume) so "Speicher" can be configured.
 
 parameters:
   image:
@@ -22,6 +23,14 @@ parameters:
           - "gp1.small"
           - "gp1.medium"
     description: "VM size. Keep small/medium for student workloads."
+
+  # NEW: Root disk size as volume (controls "Speicher" in UI)
+  volume_size:
+    type: number
+    default: 8
+    constraints:
+      - range: { min: 8, max: 200 }
+    description: "Root volume size in GB."
 
   network:
     type: string
@@ -116,6 +125,20 @@ resources:
       security_groups:
         - { get_resource: secgroup }
 
+  # NEW: Root volume created from selected image
+  root_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: "dozilab-STACK-root"
+          params:
+            STACK: { get_param: stack_label }
+      size: { get_param: volume_size }
+      image: { get_param: image }
+      metadata:
+        dozilab_stack_label: { get_param: stack_label }
+
   server:
     type: OS::Nova::Server
     properties:
@@ -125,9 +148,14 @@ resources:
           params:
             STACK: { get_param: stack_label }
 
-      image: { get_param: image }
+      # image removed: booting from Cinder volume
       flavor: { get_param: flavor }
       key_name: { get_param: key_name }
+
+      block_device_mapping_v2:
+        - boot_index: 0
+          volume_id: { get_resource: root_volume }
+          delete_on_termination: true
 
       networks:
         - port: { get_resource: port }
@@ -186,3 +214,7 @@ outputs:
         template: "DOZILAB_READY stack=STACK"
         params:
           STACK: { get_param: stack_label }
+
+  root_volume_id:
+    description: "Cinder root volume ID (debug/traceability)"
+    value: { get_resource: root_volume }

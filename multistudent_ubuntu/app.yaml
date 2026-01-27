@@ -5,6 +5,7 @@ app:
   description: >
     Deploy one Ubuntu VM for a course with multiple local student accounts (username/password),
     SSH allowed only from DHBW/VPN CIDR, and a Floating IP on DHBW.
+    Root disk is a Cinder volume (Boot from Volume) so "Speicher" can be configured.
     Backend can wait for DOZILAB_READY marker in the Nova console log.
   owner_team: dozilab-app-team
 
@@ -49,6 +50,21 @@ parameters:
     required: true
     description: "VM size. Keep small/medium for student workloads."
 
+  # NEW: "Speicher" exposed via root volume size
+  - name: volume_size
+    label: Speicher (GB)
+    step: konfiguration
+    type: number
+    default: 8
+    enum:
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+    required: true
+    description: "Größe der Root-Disk als Cinder-Volume (Boot from Volume)."
+
   # --- Access control / networking ---
   - name: ssh_cidr
     label: SSH erlaubtes Netz (CIDR)
@@ -59,7 +75,6 @@ parameters:
     description: >
       IPv4 CIDR allowed to SSH and ICMP (ping). Default is DHBW/VPN range.
       Examples: 141.72.0.0/16 (VPN/Campus) or 1.2.3.4/32 (single IP).
-
 
   - name: force_password_change
     label: Passwortwechsel beim ersten Login
@@ -151,4 +166,8 @@ outputs:
 
   - name: ready_marker
     from_heat_output: ready_marker
-    description: "Marker string that appears in Nova console log when provisioning is done. Also nach was müsst ihr im log ausschau halten dass ihr wisst dass die VM Ready ist"
+    description: "Marker string that appears in Nova console log when provisioning is done. Auch nach was müsst ihr im log ausschau halten dass ihr wisst dass die VM Ready ist"
+
+  - name: root_volume_id
+    from_heat_output: root_volume_id
+    description: "Cinder root volume ID (debug/traceability)."

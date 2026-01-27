@@ -5,6 +5,15 @@ package_upgrade: false
 packages:
   - libpam-pwquality
   - python3
+  - cloud-guest-utils
+
+# Ensure root partition/filesystem grows when booting from larger volume
+growpart:
+  mode: auto
+  devices: ["/"]
+  ignore_growroot_disabled: false
+
+resize_rootfs: true
 
 write_files:
   - path: /usr/local/bin/dozilab-multiuser-setup.sh
