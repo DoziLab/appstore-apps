@@ -77,9 +77,22 @@ Begründung:
 
 ### Studenten-Accounts
 
-Parameter:
+Parameter (`user_json`, unencoded Beispiel):
 ```json
-students: {"alice":"pw","bob":"pw2"}
+{
+  "course_label": "ubuntumulti",
+  "instance": {
+    "credentials": [
+      { "username": "gruppe01", "password": "User01_2026!" },
+      { "username": "gruppe02", "password": "User02_2026!!" }
+    ],
+    "admin_credentials": {
+      "username": "teacher",
+      "password": "TeacherPw_2026!"
+    }
+  },
+  "applications": []
+}
 ```
 
 Eigenschaften:
@@ -91,6 +104,10 @@ Begründung:
 - Passt zu Lehrveranstaltungen
 - Einfach verständlich
 - Kein LDAP / Keycloak / externe Abhängigkeiten in V1
+
+Hinweis:
+- Backend sendet den Heat-Parameter `user_json` als **Base64-kodierten JSON-String** (bevorzugt).
+- Raw-JSON (multi-line) wird ebenfalls akzeptiert, z.B. für lokale Tests.
 
 ---
 

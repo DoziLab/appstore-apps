@@ -62,7 +62,7 @@ parameters:
     type: string
     default: |
       {"course_label":"","instance":{"credentials":[]},"applications":[]}
-    description: "JSON string with instance.credentials, optional instance.admin_credentials, and applications."
+    description: "Base64-encoded JSON payload (raw JSON also accepted; multi-line allowed)."
     constraints:
       - length: { min: 2 }
 
