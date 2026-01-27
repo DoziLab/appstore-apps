@@ -12,6 +12,5 @@ watch_*
 
 # env files
 .env
-.env.*
 
-env.yaml
+
