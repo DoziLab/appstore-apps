@@ -16,6 +16,11 @@ growpart:
 resize_rootfs: true
 
 write_files:
+  - path: /etc/dozilab/user.json
+    owner: root:root
+    permissions: "0600"
+    content: |
+      __USER_JSON__
   - path: /usr/local/bin/dozilab-multiuser-setup.sh
     permissions: "0755"
     content: |
@@ -29,8 +34,7 @@ write_files:
 
       STACK_LABEL="__STACK_LABEL__"
 
-      # IMPORTANT: must be valid JSON (double quotes). Keep single quotes around JSON to prevent $ expansion.
-      STUDENTS_JSON='__STUDENTS_JSON__'
+      USER_JSON_PATH="/etc/dozilab/user.json"
       FORCE="__FORCE_CHANGE__"
       WORKDIR="__WORKDIR__"
 
@@ -40,7 +44,9 @@ write_files:
       PW_REQUIRE_SPECIAL="__PW_REQUIRE_SPECIAL__"
 
       mkdir -p "$MARK_DIR"
-      echo "multiuser setup started $(date -Is)" > "$LOG"
+      # Mirror logs to cloud-init output and our own logfile
+      exec > >(tee -a "$LOG" /var/log/cloud-init-output.log) 2>&1
+      echo "multiuser setup started $(date -Is)"
 
       on_fail() {
         rc=$?
@@ -96,7 +102,7 @@ write_files:
         sed -i -E "/^\s*password\s+.*pam_unix\.so/ i password requisite pam_pwquality.so ${PWQ_OPTS}" "$PAM_FILE"
       fi
 
-      # SSH: enable password login (students use passwords)
+      # SSH: enable password login (users use passwords)
       cat >/etc/ssh/sshd_config.d/99-dozilab-multiuser.conf <<'EOF'
       PasswordAuthentication yes
       KbdInteractiveAuthentication yes
@@ -105,44 +111,75 @@ write_files:
       PermitRootLogin no
       EOF
 
-      export STUDENTS_JSON FORCE WORKDIR
+      export USER_JSON_PATH FORCE WORKDIR
 
-      # Create students (hard fail if any user cannot be created or password cannot be set)
+      # Create users from user_json (hard fail on invalid schema)
       python3 - <<'PY'
       import json, os, re, sys, subprocess
 
-      students_json = os.environ.get("STUDENTS_JSON", "")
+      user_json_path = os.environ.get("USER_JSON_PATH", "/etc/dozilab/user.json")
+      try:
+          user_json = open(user_json_path, "r", encoding="utf-8").read().strip()
+      except FileNotFoundError:
+          user_json = ""
       force = str(os.environ.get("FORCE", "true")).lower() in ("1","true","yes","on")
       workdir = os.environ.get("WORKDIR","work")
 
-      try:
-          data = json.loads(students_json)
-      except Exception as e:
-          sys.exit(f"students JSON invalid: {e}. Must be like {{\"alice\":\"pw\"}} (double quotes). Got: {students_json!r}")
+      def fail(msg):
+          print(msg, file=sys.stderr)
+          sys.exit(1)
 
-      if not isinstance(data, dict) or not data:
-          sys.exit("students must be a non-empty JSON object")
+      if not re.match(r"^[A-Za-z0-9._-]{1,32}$", workdir or ""):
+          print(f"Invalid workdir {workdir!r}, using 'work'")
+          workdir = "work"
+
+      if not user_json:
+          fail("user_json is empty or missing")
+
+      try:
+          data = json.loads(user_json)
+      except Exception as e:
+          fail(f"user_json invalid: {e}. Must be JSON with double quotes.")
+
+      if not isinstance(data, dict):
+          fail("user_json must be a JSON object")
+
+      instance = data.get("instance") or {}
+      if not isinstance(instance, dict):
+          fail("instance must be an object")
+
+      credentials = instance.get("credentials") or []
+      admin = instance.get("admin_credentials")
+      apps = data.get("applications") or []
+
+      if not isinstance(credentials, list):
+          fail("instance.credentials must be a list")
+
+      if not isinstance(apps, list):
+          print("applications is not a list; ignoring")
+          apps = []
+
+      course_label = data.get("course_label") or ""
+      if course_label:
+          print(f"course_label={course_label}")
+
+      if not credentials:
+          print("WARNING: instance.credentials empty; no student users will be created")
 
       rx = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
       def run(cmd, **kw):
           subprocess.run(cmd, check=True, **kw)
 
-      # Validate all upfront so we don't half-configure
-      for u, p in data.items():
-          if not isinstance(u, str) or not rx.match(u):
-              sys.exit(f"Invalid username: {u!r}")
-          if not isinstance(p, str) or len(p) == 0:
-              sys.exit(f"Empty password for {u}")
-
-      created = []
-
-      for u, p in data.items():
+      def ensure_user(u, p, is_admin=False):
           if subprocess.run(["id", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
               run(["useradd", "-m", "-s", "/bin/bash", u])
 
           # This MUST succeed, otherwise we fail the whole setup
           run(["chpasswd"], input=f"{u}:{p}\n", text=True)
+
+          if is_admin:
+              subprocess.run(["usermod", "-aG", "sudo", u], check=False)
 
           if force:
               subprocess.run(["chage", "-d", "0", u], check=False)
@@ -163,20 +200,66 @@ write_files:
                   f.write(line)
           run(["chown", f"{u}:{u}", profile])
 
+      created = []
+
+      # Validate credentials upfront so we don't half-configure
+      for idx, item in enumerate(credentials):
+          if not isinstance(item, dict):
+              fail(f"instance.credentials[{idx}] must be an object")
+          u = item.get("username")
+          p = item.get("password")
+          if not isinstance(u, str) or not rx.match(u):
+              fail(f"Invalid username: {u!r}")
+          if not isinstance(p, str) or len(p) == 0:
+              fail(f"Empty password for {u}")
+
+      for item in credentials:
+          u = item["username"]
+          p = item["password"]
+          ensure_user(u, p, is_admin=False)
           created.append(u)
 
-      # Restrict SSH users: ubuntu (admin key) + created students only
-      allow = "AllowUsers ubuntu " + " ".join(sorted(created)) + "\n"
+      admin_user = None
+      if admin is not None:
+          if not isinstance(admin, dict):
+              fail("instance.admin_credentials must be an object")
+          au = admin.get("username")
+          ap = admin.get("password")
+          if not isinstance(au, str) or not rx.match(au):
+              fail(f"Invalid admin username: {au!r}")
+          if not isinstance(ap, str) or len(ap) == 0:
+              fail("Empty password for admin user")
+          ensure_user(au, ap, is_admin=True)
+          admin_user = au
+
+      # Restrict SSH users: ubuntu (admin key) + created users only
+      allow_users = sorted(set(created + ([admin_user] if admin_user else [])))
+      allow = "AllowUsers " + " ".join(["ubuntu"] + allow_users) + "\n"
       with open("/etc/ssh/sshd_config.d/98-dozilab-allowusers.conf", "w", encoding="utf-8") as f:
           f.write(allow)
 
-      print("created users:", ", ".join(created))
+      if allow_users:
+          print("created users:", ", ".join(allow_users))
+
+      if not apps:
+          print("applications: none")
+      else:
+          for idx, app in enumerate(apps):
+              if isinstance(app, dict):
+                  name = app.get("name") or app.get("app") or f"index-{idx}"
+                  version = app.get("version") or app.get("ver") or ""
+                  if version:
+                      print(f"applications[{idx}]: {name} {version}")
+                  else:
+                      print(f"applications[{idx}]: {name}")
+              else:
+                  print(f"applications[{idx}]: {app!r}")
       PY
 
       # Restart sshd; if this fails, trap will mark FAILED
       systemctl restart ssh || service ssh restart
 
-      echo "multiuser setup finished $(date -Is)" >> "$LOG"
+      echo "multiuser setup finished $(date -Is)"
 
       # READY marker (ONLY here = success)
       msg="DOZILAB_READY stack=${STACK_LABEL} time=$(date -Is)"

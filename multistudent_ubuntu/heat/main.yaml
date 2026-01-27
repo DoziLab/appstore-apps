@@ -58,9 +58,11 @@ parameters:
       - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
     description: "IPv4 CIDR allowed to SSH (default DHBW/VPN)."
 
-  students:
+  user_json:
     type: string
-    description: 'JSON string map username->password. Example: {"alice":"pw","bob":"pw2"}'
+    default: |
+      {"course_label":"","instance":{"credentials":[]},"applications":[]}
+    description: "JSON string with instance.credentials, optional instance.admin_credentials, and applications."
     constraints:
       - length: { min: 2 }
 
@@ -169,7 +171,11 @@ resources:
         str_replace:
           template: { get_file: ../cloud-init/user-data.yaml }
           params:
-            __STUDENTS_JSON__: { get_param: students }
+            __USER_JSON__:
+              str_replace:
+                template: { get_param: user_json }
+                params:
+                  "\n": "\n      "
             __FORCE_CHANGE__: { get_param: force_password_change }
             __WORKDIR__: { get_param: workdir }
 
