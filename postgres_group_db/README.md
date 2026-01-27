@@ -9,6 +9,7 @@ an und vergibt **saubere Rechte pro Gruppe**.
 Die App erstellt:
 
 - 1 Ubuntu VM
+- Root-Disk als Cinder-Volume (Boot from Volume), Speicher groesse konfigurierbar
 - PostgreSQL (Standard: Version 14, nur `127.0.0.1`)
 - pro Gruppe eine Datenbank
 - pro Student einen Postgres-Login
@@ -49,6 +50,8 @@ Die App erwartet die folgenden Heat-Parameter **mit diesen Namen**:
   - z.B. `"Ubuntu 22.04 2025-01"`
 - `flavor` (string, required)
   - z.B. `"gp1.small"`
+- `volume_size` (number, required)
+  - Root-Disk als Cinder-Volume in GB (z.B. `8`, `16`, `32`)
 - `network` (string, fixed)
   - `"NAT"`
 - `external_network` (string, fixed)
@@ -181,6 +184,7 @@ Login mit `pgadmin_email`/`pgadmin_password` aus `course_spec`.
 - `ssh_hint`
 - `ssh_tunnel_hint`
 - `ready_marker` (in Nova Console Log)
+- `root_volume_id` (Cinder Root-Volume)
 
 ---
 

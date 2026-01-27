@@ -48,6 +48,20 @@ parameters:
     required: true
     description: "VM size. Keep small/medium for student workloads."
 
+  - name: volume_size
+    label: Speicher (GB)
+    step: konfiguration
+    type: number
+    default: 8
+    enum:
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+    required: true
+    description: "Größe der Root-Disk als Cinder-Volume (Boot from Volume)."
+
   # --- Access control / networking ---
   - name: ssh_cidr
     label: SSH erlaubtes Netz (CIDR)
@@ -125,3 +139,7 @@ outputs:
   - name: ready_marker
     from_heat_output: ready_marker
     description: "Marker string that appears in Nova console log when provisioning is done."
+
+  - name: root_volume_id
+    from_heat_output: root_volume_id
+    description: "Cinder root volume ID (debug/traceability)."

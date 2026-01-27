@@ -1,6 +1,6 @@
 heat_template_version: 2018-08-31
 
-description: DoziLab PostgreSQL VM (localhost-only) + optional pgAdmin4 Web UI
+description: DoziLab PostgreSQL VM (localhost-only) + optional pgAdmin4 Web UI (boot from Cinder volume)
 
 parameters:
   stack_label:
@@ -15,6 +15,13 @@ parameters:
   flavor:
     type: string
     description: Nova flavor name or ID
+
+  volume_size:
+    type: number
+    description: Root volume size in GB
+    default: 8
+    constraints:
+      - range: { min: 8, max: 200 }
 
   network:
     type: string
@@ -74,13 +81,29 @@ resources:
       network: { get_param: network }
       security_groups: [ { get_resource: secgroup } ]
 
+  root_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: "dozilab-pg-__LABEL__-root"
+          params:
+            "__LABEL__": { get_param: stack_label }
+      size: { get_param: volume_size }
+      image: { get_param: image }
+      metadata:
+        dozilab_stack_label: { get_param: stack_label }
+
   server:
     type: OS::Nova::Server
     properties:
       name: { str_replace: { template: "dozilab-pg-__LABEL__", params: { "__LABEL__": { get_param: stack_label } } } }
-      image: { get_param: image }
       flavor: { get_param: flavor }
       key_name: { get_param: key_name }
+      block_device_mapping_v2:
+        - boot_index: 0
+          volume_id: { get_resource: root_volume }
+          delete_on_termination: true
       networks:
         - port: { get_resource: port }
       user_data_format: RAW
@@ -154,3 +177,7 @@ outputs:
         template: "DOZILAB_READY stack=__LABEL__"
         params:
           "__LABEL__": { get_param: stack_label }
+
+  root_volume_id:
+    description: Cinder root volume ID (debug/traceability)
+    value: { get_resource: root_volume }
