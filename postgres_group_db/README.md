@@ -66,80 +66,75 @@ Die App erwartet die folgenden Heat-Parameter **mit diesen Namen**:
   - CIDR fuer pgAdmin HTTP (Port 80)
 
 ### Kurs-Spezifikation
-- `course_spec_b64` (string, required)
-  - Base64-kodiertes JSON (eine Zeile, keine Newlines)
+- `user_json` (string, required)
+  - Base64-kodiertes JSON (eine Zeile, keine Newlines) ODER Raw-JSON (multi-line)
+  - Legacy: base64-kodiertes Python-Literal wird akzeptiert
 
-**Wichtig:** `course_spec_b64` muss **UTF-8 JSON** sein, Base64-kodiert und ohne Zeilenumbrueche.
+**Wichtig:** Bevorzugt **UTF-8 JSON** als Base64 ohne Zeilenumbrueche.
 
 ---
 
-## course_spec JSON (Schema)
+## user_json JSON (Schema)
 
 Beispiel (unencoded):
 ```json
 {
-  "course_label": "sql-2026-01",
+  "course_label": "SQL Kurs - Herbst 2026",
+  "instance": {},
   "postgres_version": 14,
-  "pgadmin_enabled": true,
-  "pgadmin_user_role": "User",
-  "groups": {
-    "g01": {"db_name": "sql_2026_01_g01"},
-    "g02": {"db_name": "sql_2026_01_g02"}
-  },
-  "users": {
-    "s01": {
-      "group": "g01",
-      "db_user": "s01",
-      "db_password": "DbPw-s01-ChangeMe!",
-      "pgadmin_email": "s01@dozi.edu",
-      "pgadmin_password": "PgPw-s01-ChangeMe!"
+  "applications": [
+    {
+      "name": "postgres",
+      "version": "1.3.2",
+      "credentials": [
+        {
+          "group": 1,
+          "database_name": "db_g01",
+          "db_user": "grp1",
+          "password": "Grp1DbPw_2026!"
+        }
+      ],
+      "admin_credentials": {
+        "db_user": "teacher",
+        "password": "TeacherDbPw_2026!"
+      }
+    },
+    {
+      "name": "pgadmin",
+      "version": "4.3.2",
+      "credentials": [
+        {
+          "group": 1,
+          "email": "grp1@dozi.edu",
+          "password": "Grp1PgPw_2026!"
+        }
+      ],
+      "admin_credentials": {
+        "email": "teacher@dozi.edu",
+        "password": "TeacherPgPw_2026!"
+      }
     }
-  },
-  "teacher": {
-    "enabled": true,
-    "db_user": "teacher",
-    "db_password": "TeacherDbPw-ChangeMe!",
-    "pgadmin_email": "teacher@dozi.edu",
-    "pgadmin_password": "TeacherPgPw-ChangeMe!"
-  }
+  ]
 }
 ```
 
 ### Felder
-- `course_label` (string)
-- `postgres_version` (int, 10..17)
-- `pgadmin_enabled` (bool)
-- `pgadmin_user_role` (string)
-  - Rolle fuer alle Nicht-Admins in pgAdmin (bei pgAdmin 4: `"User"`)
-- `groups` (object, required)
-  - Key: Gruppen-ID (z.B. `g01`)
-  - Value: `{ "db_name": "<db_name>" }`
-- `users` (object, optional)
-  - Key: User-ID (z.B. `s01`)
-  - Value:
-    - `group` (string, required) -> muss in `groups` existieren
-    - `db_user` (string, optional; default = Key)
-    - `db_password` (string, required; min 6)
-    - `pgadmin_email` (string, optional)
-    - `pgadmin_password` (string, optional)
-- `teacher` (object, optional)
-  - `enabled` (bool)
-  - `db_user` (string; default `teacher`)
-  - `db_password` (string; min 6)
-  - `pgadmin_email` / `pgadmin_password`
+- `course_label` (string, optional)
+- `instance` (object, optional; aktuell ignoriert)
+- `postgres_version` (int, optional; 10..17). Auch als `postgresVersion` akzeptiert; alternativ im Postgres-App-Objekt via `postgres_version`/`postgresVersion`.
+- `applications` (array, required); enthaelt mindestens `name: "postgres"` (oder `"postgresql"`). Optional `name: "pgadmin"`.
+- Postgres-App: `credentials` (list) mit `group`, `database_name` (oder `db_name`), `db_user`, `password`; `admin_credentials` optional (`db_user`, `password`).
+- pgAdmin-App (optional): `credentials` (list) mit `group`, `email`, `password`; `admin_credentials` required (`email`, `password`).
 
 ### Validierung/Constraints
-- `db_name` und `db_user` muessen dem Regex folgen:
-  - `^[a-z_][a-z0-9_]{0,62}$`
-- `users[*].group` muss existieren
+- `group` token: `[A-Za-z0-9_]`, 1..32 (string oder Zahl)
+- `database_name`/`db_name` und `db_user` muessen dem Regex folgen: `^[a-z_][a-z0-9_]{0,62}$`
 - Passwortlaenge min. 6
+- `db_user` muss eindeutig sein; pgAdmin-E-Mails muessen eindeutig sein
+- Wenn `pgadmin` vorhanden ist, muessen `credentials` und `admin_credentials` gesetzt sein
 
-### Generator
-Im Repo gibt es einen Generator:
-```
-python3 base64_erzeuger.py --students 20 --group-size 4 --domain dozi.edu
-```
-Der Output enthaelt das JSON und die passende Base64-Zeile fuer `course_spec_b64`.
+### Generator (Legacy)
+Der Generator `base64_erzeuger.py` erzeugt das alte `course_spec`-Format und ist nicht mehr kompatibel. Wenn ihr einen Generator fuer `user_json` braucht, sag Bescheid.
 
 ---
 
@@ -170,7 +165,7 @@ ssh -i ~/.ssh/heat-bastion-key.pem -L 5432:127.0.0.1:5432 ubuntu@<floating_ip>
 ```
 http://<floating_ip>/pgadmin4/
 ```
-Login mit `pgadmin_email`/`pgadmin_password` aus `course_spec`.
+Login mit `email`/`password` aus `user_json` (`pgadmin.admin_credentials` fuer Admins oder `pgadmin.credentials` fuer User).
 
 ---
 

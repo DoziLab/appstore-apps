@@ -1,0 +1,61 @@
+parameter_defaults:
+  stack_label: "sql-2026-01"
+  image: "Ubuntu 22.04 2025-01"
+  flavor: "gp1.small"
+  volume_size: 8
+  network: "NAT"
+  external_network: "DHBW"
+  ssh_cidr: "141.72.0.0/16"
+
+  # optional (falls du pgAdmin wirklich öffentlich willst):
+  # web_cidr: "141.72.0.0/16"
+
+  user_json: |
+    {
+      "course_label": "sql-kek",
+      "instance": {},
+      "applications": [
+        {
+          "name": "postgres",
+          "version": "1.3.2",
+          "credentials": [
+            {
+              "group": 1,
+              "database_name": "db_g01",
+              "db_user": "grp1",
+              "password": "Grp1DbPw_2026!"
+            },
+            {
+              "group": 2,
+              "database_name": "db_g02",
+              "db_user": "grp2",
+              "password": "Grp2DbPw_2026!"
+            }
+          ],
+          "admin_credentials": {
+            "db_user": "teacher",
+            "password": "TeacherDbPw_2026!"
+          }
+        },
+        {
+          "name": "pgadmin",
+          "version": "4.3.2",
+          "credentials": [
+            {
+              "group": 1,
+              "email": "grp1@kek.de",
+              "password": "Grp1PgPw_2026!"
+            },
+            {
+              "group": 2,
+              "email": "grp2@kek.de",
+              "password": "Grp2PgPw_2026!"
+            }
+          ],
+          "admin_credentials": {
+            "email": "teacher@kek.de",
+            "password": "TeacherPgPw_2026!"
+          }
+        }
+      ]
+    }

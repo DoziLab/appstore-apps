@@ -3,7 +3,7 @@ package_update: true
 package_upgrade: false
 
 write_files:
-  - path: /etc/dozilab/user.json
+  - path: /etc/dozilab/user.json.payload
     owner: root:root
     permissions: "0600"
     content: |
@@ -23,6 +23,7 @@ write_files:
       FAIL_FILE="${MARK_DIR}/failed"
 
       STACK_LABEL="__STACK_LABEL__"
+      USER_JSON_PAYLOAD="/etc/dozilab/user.json.payload"
       USER_JSON_PATH="/etc/dozilab/user.json"
 
       mkdir -p "$MARK_DIR"
@@ -39,17 +40,73 @@ write_files:
 
       echo "DoziLab setup started $(date -Is)"
       echo "Stack label: ${STACK_LABEL}"
-      echo "Using user_json: ${USER_JSON_PATH}"
+      echo "Using user_json payload: ${USER_JSON_PAYLOAD}"
 
-      if [[ ! -s "$USER_JSON_PATH" ]]; then
-        echo "ERROR: $USER_JSON_PATH missing/empty" >&2
+      if [[ ! -s "$USER_JSON_PAYLOAD" ]]; then
+        echo "ERROR: $USER_JSON_PAYLOAD missing/empty" >&2
         exit 2
       fi
 
       # ------------------------------------------------------------
-      # Validate payload (NO normalization, NO sanitizing, NO fallback)
-      # Backend must send final db_user + database_name etc.
+      # Decode wrapper (base64 or raw) into JSON file, then validate payload.
+      # Backend must send final db_user + database_name etc. (no sanitizing)
       # ------------------------------------------------------------
+      python3 - <<'PY'
+      import ast
+      import base64
+      import json
+      import sys
+      from pathlib import Path
+
+      payload_path = Path("/etc/dozilab/user.json.payload")
+      out_path = Path("/etc/dozilab/user.json")
+
+      raw = payload_path.read_text(encoding="utf-8").strip()
+      if not raw:
+          sys.exit("user_json payload missing/empty")
+
+      def parse_obj(txt: str):
+          try:
+              return json.loads(txt), "json"
+          except Exception:
+              pass
+          try:
+              return ast.literal_eval(txt), "python-literal"
+          except Exception:
+              return None, None
+
+      def decode_b64(s: str):
+          compact = "".join(s.split())
+          pad = (-len(compact)) % 4
+          compact += "=" * pad
+          try:
+              return base64.b64decode(compact, validate=True).decode("utf-8")
+          except Exception:
+              try:
+                  return base64.b64decode(compact).decode("utf-8")
+              except Exception:
+                  return None
+
+      obj, kind = parse_obj(raw)
+      source = "raw"
+      if obj is None:
+          decoded = decode_b64(raw)
+          if decoded is None:
+              sys.exit("user_json payload is neither JSON/literal nor base64-encoded JSON/literal")
+          obj, kind = parse_obj(decoded.strip())
+          if obj is None:
+              sys.exit("user_json base64 decoded, but not valid JSON or python literal")
+          source = "base64"
+
+      out_path.write_text(json.dumps(obj, ensure_ascii=True), encoding="utf-8")
+      print(f"user_json normalized ({source}, {kind}) -> {out_path}")
+      PY
+
+      if [[ ! -s "$USER_JSON_PATH" ]]; then
+        echo "ERROR: $USER_JSON_PATH missing/empty after decoding" >&2
+        exit 2
+      fi
+
       echo "Validating user_json schema (direct) ..."
       python3 - <<'PY'
       import json, re, sys
