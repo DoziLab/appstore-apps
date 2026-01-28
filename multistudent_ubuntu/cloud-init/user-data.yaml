@@ -234,12 +234,14 @@ write_files:
       def run(cmd, **kw):
           subprocess.run(cmd, check=True, **kw)
 
+      NL = chr(10)
+
       def ensure_user(u, p, is_admin=False):
           if subprocess.run(["id", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
               run(["useradd", "-m", "-s", "/bin/bash", u])
 
           # This MUST succeed, otherwise we fail the whole setup
-          run(["chpasswd"], input=f"{u}:{p}\n", text=True)
+          run(["chpasswd"], input=f"{u}:{p}" + NL, text=True)
 
           if is_admin:
               subprocess.run(["usermod", "-aG", "sudo", u], check=False)
@@ -253,7 +255,7 @@ write_files:
           run(["chmod", "700", f"/home/{u}/{workdir}"])
 
           profile = f"/home/{u}/.profile"
-          line = f'cd "$HOME/{workdir}"\n'
+          line = f'cd "$HOME/{workdir}"' + NL
           try:
               txt = open(profile, "r", encoding="utf-8", errors="ignore").read()
           except FileNotFoundError:
@@ -297,7 +299,7 @@ write_files:
 
       # Restrict SSH users: ubuntu (admin key) + created users only
       allow_users = sorted(set(created + ([admin_user] if admin_user else [])))
-      allow = "AllowUsers " + " ".join(["ubuntu"] + allow_users) + "\n"
+      allow = "AllowUsers " + " ".join(["ubuntu"] + allow_users) + NL
       with open("/etc/ssh/sshd_config.d/98-dozilab-allowusers.conf", "w", encoding="utf-8") as f:
           f.write(allow)
 
