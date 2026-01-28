@@ -112,11 +112,7 @@ resources:
           template: { get_file: ../cloud-init/user-data.yaml }
           params:
             "__STACK_LABEL__": { get_param: stack_label }
-            "__USER_JSON__":
-              str_replace:
-                template: { get_param: user_json }
-                params:
-                  "\n": "\n      "
+            "__USER_JSON__": { get_param: user_json }
 
   fip:
     type: OS::Neutron::FloatingIP
