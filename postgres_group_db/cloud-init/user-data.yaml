@@ -444,7 +444,7 @@ write_files:
 
         echo "Configuring pgAdmin admin account (direct) ..."
         python3 - <<'PY'
-      import json, sys
+      import json, shlex, sys
 
       spec = json.load(open("/etc/dozilab/user.json"))
       apps = spec.get("applications") or []
@@ -467,9 +467,9 @@ write_files:
       if len(pw) < 6:
           sys.exit("pgAdmin admin password too short (min 6)")
 
-      open("/etc/default/pgadmin4", "w").write(
-          f'PGADMIN_SETUP_EMAIL="{email}"\nPGADMIN_SETUP_PASSWORD="{pw}"\n'
-      )
+      with open("/etc/default/pgadmin4", "w") as f:
+          print(f"PGADMIN_SETUP_EMAIL={shlex.quote(email)}", file=f)
+          print(f"PGADMIN_SETUP_PASSWORD={shlex.quote(pw)}", file=f)
       print("pgAdmin admin email:", email)
       PY
 
