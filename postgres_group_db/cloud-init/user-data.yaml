@@ -543,7 +543,7 @@ write_files:
           elif "already exists" in out.lower():
               print(f"pgAdmin user already exists: {email}")
           else:
-              print(f"WARNING: failed to create pgAdmin user {email} rc={res.returncode}\n{out}")
+              print(f"WARNING: failed to create pgAdmin user {email} rc={res.returncode} out={out}")
 
       print(f"pgAdmin accounts processed: {len(accounts)}, created: {created}")
       PY
