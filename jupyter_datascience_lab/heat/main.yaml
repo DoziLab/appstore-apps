@@ -1,0 +1,206 @@
+heat_template_version: 2018-08-31
+
+description: >
+  DoziLab Jupyter Data Science Lab: Ubuntu VM + JupyterHub/JupyterLab +
+  multiple local course users. No Cinder volume is created.
+
+parameters:
+  stack_label:
+    type: string
+    description: Short label used in hostname/log markers
+    default: "jupyter"
+    constraints:
+      - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
+
+  image:
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+    constraints:
+      - allowed_values:
+          - "Ubuntu 22.04 2025-01"
+          - "Ubuntu 24.04 2025-01"
+          - "Ubuntu 24.04 2026-01"
+    description: "Base image for the VM."
+
+  flavor:
+    type: string
+    default: "gp1.medium"
+    constraints:
+      - allowed_values:
+          - "gp1.small"
+          - "gp1.medium"
+    description: "VM size."
+
+  network:
+    type: string
+    default: "NAT"
+    constraints:
+      - allowed_values: ["NAT"]
+
+  external_network:
+    type: string
+    default: "DHBW"
+    constraints:
+      - allowed_values: ["DHBW"]
+
+  key_name:
+    type: string
+    default: "heat-bastion-key"
+    constraints:
+      - allowed_values: ["heat-bastion-key"]
+    description: "Admin/support SSH keypair"
+
+  ssh_cidr:
+    type: string
+    default: "141.72.0.0/16"
+    constraints:
+      - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to SSH."
+
+  web_cidr:
+    type: string
+    default: "141.72.0.0/16"
+    constraints:
+      - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to JupyterHub over HTTP."
+
+  user_json:
+    type: string
+    default: |
+      {"course_label":"","instance":{"credentials":[]},"applications":[]}
+    description: "Base64-encoded JSON payload (raw JSON also accepted; multi-line allowed)."
+    constraints:
+      - length: { min: 2 }
+
+  install_examples:
+    type: boolean
+    default: true
+
+  workdir:
+    type: string
+    default: "work"
+    constraints:
+      - allowed_pattern: '^[A-Za-z0-9._-]{1,32}$'
+    description: "Work directory under each user's home."
+
+resources:
+  secgroup:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name:
+        str_replace:
+          template: "dozilab-jupyter-STACK"
+          params:
+            STACK: { get_param: stack_label }
+      description: Security group for DoziLab Jupyter Data Science Lab
+      rules:
+        - direction: ingress
+          ethertype: IPv4
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+          remote_ip_prefix: { get_param: ssh_cidr }
+
+        - direction: ingress
+          ethertype: IPv4
+          protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+          remote_ip_prefix: { get_param: web_cidr }
+
+        - direction: ingress
+          ethertype: IPv4
+          protocol: icmp
+          remote_ip_prefix: { get_param: ssh_cidr }
+
+        - direction: egress
+          ethertype: IPv4
+
+  port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_param: network }
+      security_groups:
+        - { get_resource: secgroup }
+
+  server:
+    type: OS::Nova::Server
+    properties:
+      name:
+        str_replace:
+          template: "dozilab-jupyter-STACK"
+          params:
+            STACK: { get_param: stack_label }
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: port }
+      metadata:
+        dozilab_stack_label: { get_param: stack_label }
+        dozilab_ready_marker: "DOZILAB_READY"
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: { get_file: ../cloud-init/user-data.yaml }
+          params:
+            __STACK_LABEL__: { get_param: stack_label }
+            __USER_JSON__:
+              str_replace:
+                template: { get_param: user_json }
+                params:
+                  "\n": "\n      "
+            __INSTALL_EXAMPLES__: { get_param: install_examples }
+            __WORKDIR__: { get_param: workdir }
+
+  fip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network }
+
+  fip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: fip }
+      port_id: { get_resource: port }
+
+outputs:
+  ssh_user:
+    description: SSH username
+    value: ubuntu
+
+  floating_ip:
+    description: Public Floating IP
+    value: { get_attr: [fip, floating_ip_address] }
+
+  private_ip:
+    description: Private IP on tenant network
+    value: { get_attr: [port, fixed_ips, 0, ip_address] }
+
+  server_id:
+    description: Nova server ID
+    value: { get_resource: server }
+
+  jupyter_url:
+    description: JupyterHub URL
+    value:
+      str_replace:
+        template: "http://FIP/"
+        params:
+          FIP: { get_attr: [fip, floating_ip_address] }
+
+  ssh_hint:
+    description: Admin SSH (key-based)
+    value:
+      str_replace:
+        template: "ssh -i ~/.ssh/heat-bastion-key.pem ubuntu@FIP"
+        params:
+          FIP: { get_attr: [fip, floating_ip_address] }
+
+  ready_marker:
+    description: Backend should wait until this marker appears in the Nova console log
+    value:
+      str_replace:
+        template: "DOZILAB_READY stack=STACK"
+        params:
+          STACK: { get_param: stack_label }

@@ -1,0 +1,424 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+packages:
+  - python3
+  - python3-pip
+  - python3-venv
+  - python3-dev
+  - build-essential
+  - nodejs
+  - npm
+  - nginx
+  - git
+  - libpam0g-dev
+
+write_files:
+  - path: /etc/dozilab/user.json.payload
+    owner: root:root
+    permissions: "0600"
+    content: |
+      __USER_JSON__
+
+  - path: /usr/local/bin/dozilab-jupyter-setup.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      LOG="/var/log/dozilab-jupyter.log"
+      MARK_DIR="/var/lib/dozilab"
+      READY_FILE="${MARK_DIR}/ready"
+      FAIL_FILE="${MARK_DIR}/failed"
+
+      STACK_LABEL="__STACK_LABEL__"
+      USER_JSON_PAYLOAD="/etc/dozilab/user.json.payload"
+      USER_JSON_PATH="/etc/dozilab/user.json"
+      INSTALL_EXAMPLES="__INSTALL_EXAMPLES__"
+      WORKDIR="__WORKDIR__"
+      export WORKDIR INSTALL_EXAMPLES
+
+      mkdir -p "$MARK_DIR" /etc/dozilab /etc/jupyterhub /opt/dozilab/notebooks
+      exec > >(tee -a "$LOG" /var/log/cloud-init-output.log) 2>&1
+      echo "jupyter setup started $(date -Is)"
+
+      on_fail() {
+        rc=$?
+        msg="DOZILAB_FAILED stack=${STACK_LABEL} rc=${rc} time=$(date -Is)"
+        echo "$msg" | tee -a "$LOG" | tee /dev/console > "$FAIL_FILE"
+        chmod 644 "$FAIL_FILE" || true
+        exit "$rc"
+      }
+      trap on_fail ERR
+
+      to_bool() {
+        local v="${1:-}"
+        v="$(echo "$v" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        [[ "$v" == "1" || "$v" == "true" || "$v" == "yes" || "$v" == "on" ]]
+      }
+
+      if [[ ! -s "$USER_JSON_PAYLOAD" ]]; then
+        echo "ERROR: $USER_JSON_PAYLOAD missing/empty" >&2
+        exit 2
+      fi
+
+      python3 - <<'PY'
+      import ast
+      import base64
+      import json
+      import sys
+      from pathlib import Path
+
+      payload_path = Path("/etc/dozilab/user.json.payload")
+      out_path = Path("/etc/dozilab/user.json")
+
+      raw = payload_path.read_text(encoding="utf-8").strip()
+      if not raw:
+          sys.exit("user_json payload missing/empty")
+
+      def parse_obj(txt):
+          try:
+              return json.loads(txt), "json"
+          except Exception:
+              pass
+          try:
+              return ast.literal_eval(txt), "python-literal"
+          except Exception:
+              return None, None
+
+      def decode_b64(s):
+          compact = "".join(s.split())
+          compact += "=" * ((-len(compact)) % 4)
+          try:
+              return base64.b64decode(compact, validate=True).decode("utf-8")
+          except Exception:
+              try:
+                  return base64.b64decode(compact).decode("utf-8")
+              except Exception:
+                  return None
+
+      obj, kind = parse_obj(raw)
+      source = "raw"
+      if obj is None:
+          decoded = decode_b64(raw)
+          if decoded is None:
+              sys.exit("user_json payload is neither JSON/literal nor base64-encoded JSON/literal")
+          obj, kind = parse_obj(decoded.strip())
+          if obj is None:
+              sys.exit("user_json base64 decoded, but not valid JSON or python literal")
+          source = "base64"
+
+      out_path.write_text(json.dumps(obj, ensure_ascii=True), encoding="utf-8")
+      print(f"user_json normalized ({source}, {kind}) -> {out_path}")
+      PY
+
+      python3 - <<'PY'
+      import json
+      import os
+      import re
+      import subprocess
+      import sys
+      from pathlib import Path
+
+      user_json_path = Path("/etc/dozilab/user.json")
+      workdir = os.environ.get("WORKDIR", "work")
+
+      def fail(msg):
+          print(msg, file=sys.stderr)
+          sys.exit(1)
+
+      if not re.match(r"^[A-Za-z0-9._-]{1,32}$", workdir or ""):
+          print(f"Invalid workdir {workdir!r}, using 'work'")
+          workdir = "work"
+
+      try:
+          data = json.loads(user_json_path.read_text(encoding="utf-8"))
+      except Exception as e:
+          fail(f"user_json invalid: {e}")
+
+      if not isinstance(data, dict):
+          fail("user_json must be a JSON object")
+
+      instance = data.get("instance") or {}
+      if not isinstance(instance, dict):
+          fail("instance must be an object")
+
+      credentials = instance.get("credentials") or []
+      admin = instance.get("admin_credentials")
+      admin_users = []
+      if not isinstance(credentials, list):
+          fail("instance.credentials must be a list")
+
+      course_label = data.get("course_label") or ""
+      if course_label:
+          print(f"course_label={course_label}")
+
+      username_rx = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+      users = []
+
+      def run(cmd, **kwargs):
+          subprocess.run(cmd, check=True, **kwargs)
+
+      def validate_user(item, label):
+          if not isinstance(item, dict):
+              fail(f"{label} must be an object")
+          username = item.get("username")
+          password = item.get("password")
+          if not isinstance(username, str) or not username_rx.match(username):
+              fail(f"Invalid username: {username!r}")
+          if not isinstance(password, str) or not password:
+              fail(f"Empty password for {username}")
+          return username, password
+
+      for idx, item in enumerate(credentials):
+          validate_user(item, f"instance.credentials[{idx}]")
+
+      def ensure_user(username, password, is_admin=False):
+          if subprocess.run(["id", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+              run(["useradd", "-m", "-s", "/bin/bash", username])
+
+          run(["chpasswd"], input=f"{username}:{password}\n", text=True)
+
+          if is_admin:
+              subprocess.run(["usermod", "-aG", "sudo", username], check=False)
+
+          home = Path("/home") / username
+          user_workdir = home / workdir
+          run(["mkdir", "-p", str(user_workdir)])
+          run(["chown", "-R", f"{username}:{username}", str(user_workdir)])
+          run(["chmod", "700", str(home)])
+          run(["chmod", "700", str(user_workdir)])
+
+          profile = home / ".profile"
+          line = f'cd "$HOME/{workdir}"\n'
+          try:
+              content = profile.read_text(encoding="utf-8", errors="ignore")
+          except FileNotFoundError:
+              content = ""
+          if f'cd "$HOME/{workdir}"' not in content:
+              with profile.open("a", encoding="utf-8") as f:
+                  f.write(line)
+          run(["chown", f"{username}:{username}", str(profile)])
+
+      for item in credentials:
+          username, password = validate_user(item, "credential")
+          ensure_user(username, password, is_admin=False)
+          users.append(username)
+
+      if admin is not None:
+          username, password = validate_user(admin, "instance.admin_credentials")
+          ensure_user(username, password, is_admin=True)
+          admin_users.append(username)
+          users.append(username)
+
+      if not users:
+          print("WARNING: no Jupyter users were created")
+
+      allowed = sorted(set(users))
+      Path("/etc/jupyterhub/allowed_users").write_text("\n".join(allowed) + ("\n" if allowed else ""), encoding="utf-8")
+      Path("/etc/jupyterhub/admin_users").write_text("\n".join(sorted(set(admin_users))) + ("\n" if admin_users else ""), encoding="utf-8")
+
+      print("jupyter users:", ", ".join(allowed) if allowed else "(none)")
+      PY
+
+      python3 -m venv /opt/jupyterhub
+      /opt/jupyterhub/bin/python -m pip install --upgrade pip wheel setuptools
+      /opt/jupyterhub/bin/pip install \
+        jupyterhub \
+        jupyterlab \
+        notebook \
+        ipykernel \
+        numpy \
+        pandas \
+        matplotlib \
+        scipy \
+        scikit-learn \
+        seaborn \
+        sqlalchemy \
+        psycopg2-binary \
+        requests
+
+      if ! command -v configurable-http-proxy >/dev/null 2>&1; then
+        apt-get update
+        apt-get install -y node-configurable-http-proxy || npm install -g configurable-http-proxy@4
+      fi
+
+      command -v configurable-http-proxy >/dev/null 2>&1
+
+      cat >/etc/jupyterhub/jupyterhub_config.py <<PY
+      from pathlib import Path
+
+      c.JupyterHub.bind_url = "http://127.0.0.1:8000/"
+      c.JupyterHub.cookie_secret_file = "/etc/jupyterhub/jupyterhub_cookie_secret"
+      c.JupyterHub.db_url = "sqlite:////var/lib/jupyterhub/jupyterhub.sqlite"
+      c.JupyterHub.log_level = "INFO"
+
+      c.Authenticator.allowed_users = {
+          line.strip()
+          for line in Path("/etc/jupyterhub/allowed_users").read_text().splitlines()
+          if line.strip()
+      }
+      c.Authenticator.admin_users = {
+          line.strip()
+          for line in Path("/etc/jupyterhub/admin_users").read_text().splitlines()
+          if line.strip()
+      }
+
+      c.Spawner.default_url = "/lab"
+      c.Spawner.notebook_dir = "~/${WORKDIR}"
+      c.Spawner.cmd = ["/opt/jupyterhub/bin/jupyterhub-singleuser"]
+      c.Spawner.environment = {
+          "PATH": "/opt/jupyterhub/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      }
+      PY
+
+      mkdir -p /var/lib/jupyterhub
+      chmod 700 /etc/jupyterhub /var/lib/jupyterhub
+
+      cat >/etc/systemd/system/jupyterhub.service <<'EOF'
+      [Unit]
+      Description=JupyterHub
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/etc/jupyterhub
+      ExecStart=/opt/jupyterhub/bin/jupyterhub -f /etc/jupyterhub/jupyterhub_config.py
+      Restart=on-failure
+      RestartSec=5
+      Environment=PATH=/opt/jupyterhub/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      rm -f /etc/nginx/sites-enabled/default
+      cat >/etc/nginx/sites-available/dozilab-jupyter <<'EOF'
+      server {
+          listen 80 default_server;
+          server_name _;
+
+          client_max_body_size 100m;
+
+          location / {
+              proxy_pass http://127.0.0.1:8000;
+              proxy_http_version 1.1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+              proxy_read_timeout 86400;
+          }
+      }
+      EOF
+      ln -sf /etc/nginx/sites-available/dozilab-jupyter /etc/nginx/sites-enabled/dozilab-jupyter
+
+      if to_bool "$INSTALL_EXAMPLES"; then
+        cat >/opt/dozilab/notebooks/01_python_basics.ipynb <<'EOF'
+      {
+       "cells": [
+        {
+         "cell_type": "markdown",
+         "metadata": {},
+         "source": ["# Python Basics\n", "Erste Schritte im DoziLab Jupyter Data Science Lab."]
+        },
+        {
+         "cell_type": "code",
+         "execution_count": null,
+         "metadata": {},
+         "outputs": [],
+         "source": ["values = [1, 2, 3, 4]\n", "sum(values) / len(values)"]
+        }
+       ],
+       "metadata": {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "pygments_lexer": "ipython3"}
+       },
+       "nbformat": 4,
+       "nbformat_minor": 5
+      }
+      EOF
+
+        cat >/opt/dozilab/notebooks/02_pandas_intro.ipynb <<'EOF'
+      {
+       "cells": [
+        {
+         "cell_type": "markdown",
+         "metadata": {},
+         "source": ["# Pandas Intro\n", "Ein kleines DataFrame-Beispiel."]
+        },
+        {
+         "cell_type": "code",
+         "execution_count": null,
+         "metadata": {},
+         "outputs": [],
+         "source": ["import pandas as pd\n", "df = pd.DataFrame({'name': ['A', 'B', 'C'], 'score': [12, 18, 15]})\n", "df"]
+        }
+       ],
+       "metadata": {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "pygments_lexer": "ipython3"}
+       },
+       "nbformat": 4,
+       "nbformat_minor": 5
+      }
+      EOF
+
+        python3 - <<'PY'
+      import os
+      import pwd
+      import shutil
+      from pathlib import Path
+
+      workdir = os.environ.get("WORKDIR", "work")
+      allowed_path = Path("/etc/jupyterhub/allowed_users")
+      template_dir = Path("/opt/dozilab/notebooks")
+
+      users = [line.strip() for line in allowed_path.read_text().splitlines() if line.strip()]
+      for username in users:
+          user_info = pwd.getpwnam(username)
+          target = Path(user_info.pw_dir) / workdir / "notebooks"
+          target.mkdir(parents=True, exist_ok=True)
+          for source in template_dir.glob("*.ipynb"):
+              destination = target / source.name
+              if not destination.exists():
+                  shutil.copy2(source, destination)
+          for path in target.rglob("*"):
+              os.chown(path, user_info.pw_uid, user_info.pw_gid)
+          os.chown(target, user_info.pw_uid, user_info.pw_gid)
+      PY
+      fi
+
+      cat >/etc/ssh/sshd_config.d/99-dozilab-jupyter.conf <<'EOF'
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      UsePAM yes
+      PermitRootLogin no
+      AllowUsers ubuntu
+      EOF
+
+      systemctl daemon-reload
+      systemctl enable --now jupyterhub
+      systemctl restart nginx
+      systemctl restart ssh || service ssh restart
+
+      sleep 5
+      systemctl is-active --quiet jupyterhub
+      systemctl is-active --quiet nginx
+
+      echo "jupyter setup finished $(date -Is)"
+      msg="DOZILAB_READY stack=${STACK_LABEL} time=$(date -Is)"
+      echo "$msg" | tee -a "$LOG" | tee /dev/console > "$READY_FILE"
+      chmod 644 "$READY_FILE"
+
+runcmd:
+  - [ bash, -lc, "/usr/local/bin/dozilab-jupyter-setup.sh" ]
+
+final_message: "DoziLab Jupyter Data Science Lab: cloud-init finished"

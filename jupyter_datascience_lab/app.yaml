@@ -1,0 +1,135 @@
+app:
+  name: jupyter-datascience-lab
+  label: Jupyter Data Science Lab
+  version: 1.0.0
+  description: >
+    Provision one Ubuntu VM with JupyterHub, JupyterLab, and common Python
+    data-science packages. Creates local course users from user_json and exposes
+    JupyterHub through Nginx on HTTP, restricted by CIDR. Backend can wait for
+    the DOZILAB_READY marker in the Nova console log.
+  owner_team: dozilab-app-team
+
+artifacts:
+  heat_template: heat/main.yaml
+  cloud_init: cloud-init/user-data.yaml
+
+parameters:
+  - name: stack_label
+    label: Label
+    step: template
+    type: string
+    default: "jupyter"
+    required: true
+    description: >
+      Short course/stack label used in VM name and log markers (e.g. ds-2026-01).
+      Must match: ^[a-z0-9][a-z0-9-]{0,30}$
+
+  - name: image
+    label: Image
+    step: konfiguration
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+    enum:
+      - "Ubuntu 22.04 2025-01"
+      - "Ubuntu 24.04 2025-01"
+      - "Ubuntu 24.04 2026-01"
+    required: true
+    description: "Base image for the VM (restricted to known good images)."
+
+  - name: flavor
+    label: Flavor
+    step: konfiguration
+    type: string
+    default: "gp1.medium"
+    enum:
+      - "gp1.small"
+      - "gp1.medium"
+    required: true
+    description: "VM size. gp1.medium is recommended for multi-user Jupyter workloads."
+
+  - name: ssh_cidr
+    label: SSH erlaubtes Netz (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: >
+      IPv4 CIDR allowed to SSH. Default is DHBW/VPN range.
+      Examples: 141.72.0.0/16 or 1.2.3.4/32.
+
+  - name: web_cidr
+    label: Jupyter erlaubtes Netz (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "IPv4 CIDR allowed to reach JupyterHub over HTTP port 80."
+
+  - name: install_examples
+    label: Beispiel-Notebooks installieren
+    step: konfiguration
+    type: boolean
+    default: true
+    required: true
+    description: "Create a small notebooks folder in each user's work directory."
+
+  - name: workdir
+    label: Arbeitsordner
+    step: zugriff
+    type: string
+    default: "work"
+    required: true
+    description: "Directory created under each user's home and used by JupyterLab."
+
+  - name: network
+    label: Internes Netzwerk
+    step: netzwerk
+    type: string
+    default: "NAT"
+    hidden: true
+    description: "Internal network (fixed)."
+
+  - name: external_network
+    label: Externes Netzwerk (Floating IP)
+    step: netzwerk
+    type: string
+    default: "DHBW"
+    hidden: true
+    description: "External/FloatingIP network (fixed)."
+
+  - name: key_name
+    label: Admin SSH-Key
+    step: zugriff
+    type: string
+    default: "heat-bastion-key"
+    hidden: true
+    description: "Admin/support SSH keypair (fixed)."
+
+outputs:
+  - name: ssh_user
+    from_heat_output: ssh_user
+    description: "SSH username (ubuntu)."
+
+  - name: floating_ip
+    from_heat_output: floating_ip
+    description: "Public floating IP address."
+
+  - name: private_ip
+    from_heat_output: private_ip
+    description: "Private IP on tenant network."
+
+  - name: server_id
+    from_heat_output: server_id
+    description: "Nova server ID (useful for console-log polling)."
+
+  - name: jupyter_url
+    from_heat_output: jupyter_url
+    description: "JupyterHub URL."
+
+  - name: ssh_hint
+    from_heat_output: ssh_hint
+    description: "Admin SSH command template."
+
+  - name: ready_marker
+    from_heat_output: ready_marker
+    description: "Marker string that appears in Nova console log when provisioning is done."
