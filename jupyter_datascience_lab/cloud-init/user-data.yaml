@@ -65,7 +65,6 @@ write_files:
       fi
 
       python3 - <<'PY'
-      import ast
       import base64
       import json
       import sys
@@ -78,15 +77,11 @@ write_files:
       if not raw:
           sys.exit("user_json payload missing/empty")
 
-      def parse_obj(txt):
+      def parse_json(txt):
           try:
-              return json.loads(txt), "json"
+              return json.loads(txt)
           except Exception:
-              pass
-          try:
-              return ast.literal_eval(txt), "python-literal"
-          except Exception:
-              return None, None
+              return None
 
       def decode_b64(s):
           compact = "".join(s.split())
@@ -99,19 +94,19 @@ write_files:
               except Exception:
                   return None
 
-      obj, kind = parse_obj(raw)
+      obj = parse_json(raw)
       source = "raw"
       if obj is None:
           decoded = decode_b64(raw)
           if decoded is None:
-              sys.exit("user_json payload is neither JSON/literal nor base64-encoded JSON/literal")
-          obj, kind = parse_obj(decoded.strip())
+              sys.exit("user_json payload is neither raw JSON nor base64-encoded JSON")
+          obj = parse_json(decoded.strip())
           if obj is None:
-              sys.exit("user_json base64 decoded, but not valid JSON or python literal")
+              sys.exit("user_json base64 decoded, but not valid JSON")
           source = "base64"
 
       out_path.write_text(json.dumps(obj, ensure_ascii=True), encoding="utf-8")
-      print(f"user_json normalized ({source}, {kind}) -> {out_path}")
+      print(f"user_json normalized ({source}) -> {out_path}")
       PY
 
       python3 - <<'PY'
@@ -147,7 +142,6 @@ write_files:
 
       credentials = instance.get("credentials") or []
       admin = instance.get("admin_credentials")
-      admin_users = []
       if not isinstance(credentials, list):
           fail("instance.credentials must be a list")
 
@@ -210,7 +204,6 @@ write_files:
       if admin is not None:
           username, password = validate_user(admin, "instance.admin_credentials")
           ensure_user(username, password, is_admin=True)
-          admin_users.append(username)
           users.append(username)
 
       if not users:
@@ -218,7 +211,6 @@ write_files:
 
       allowed = sorted(set(users))
       Path("/etc/jupyterhub/allowed_users").write_text("\n".join(allowed) + ("\n" if allowed else ""), encoding="utf-8")
-      Path("/etc/jupyterhub/admin_users").write_text("\n".join(sorted(set(admin_users))) + ("\n" if admin_users else ""), encoding="utf-8")
 
       print("jupyter users:", ", ".join(allowed) if allowed else "(none)")
       PY
@@ -237,7 +229,6 @@ write_files:
         scikit-learn \
         seaborn \
         sqlalchemy \
-        psycopg2-binary \
         requests
 
       if ! command -v configurable-http-proxy >/dev/null 2>&1; then
@@ -260,12 +251,6 @@ write_files:
           for line in Path("/etc/jupyterhub/allowed_users").read_text().splitlines()
           if line.strip()
       }
-      c.Authenticator.admin_users = {
-          line.strip()
-          for line in Path("/etc/jupyterhub/admin_users").read_text().splitlines()
-          if line.strip()
-      }
-
       c.Spawner.default_url = "/lab"
       c.Spawner.notebook_dir = "~/${WORKDIR}"
       c.Spawner.cmd = ["/opt/jupyterhub/bin/jupyterhub-singleuser"]

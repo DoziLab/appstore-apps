@@ -5,8 +5,7 @@ app:
   description: >
     Provision one Ubuntu VM with JupyterHub, JupyterLab, and common Python
     data-science packages. Creates local course users from user_json and exposes
-    JupyterHub through Nginx on HTTP, restricted by CIDR. Backend can wait for
-    the DOZILAB_READY marker in the Nova console log.
+    JupyterHub through Nginx on HTTP, restricted by CIDR.
   owner_team: dozilab-app-team
 
 artifacts:

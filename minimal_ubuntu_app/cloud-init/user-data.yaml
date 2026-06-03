@@ -1,0 +1,58 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+write_files:
+  - path: /etc/dozilab/user.json.payload
+    owner: root:root
+    permissions: "0600"
+    content: |
+      __USER_JSON__
+
+  - path: /usr/local/bin/dozilab-minimal-setup.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      STACK_LABEL="__STACK_LABEL__"
+      LOG="/var/log/dozilab-minimal.log"
+      MARK_DIR="/var/lib/dozilab"
+      READY_FILE="${MARK_DIR}/ready"
+      FAILED_FILE="${MARK_DIR}/failed"
+
+      mkdir -p "$MARK_DIR" /etc/dozilab
+      exec > >(tee -a "$LOG" /var/log/cloud-init-output.log) 2>&1
+
+      on_fail() {
+        rc=$?
+        msg="DOZILAB_FAILED stack=${STACK_LABEL} rc=${rc} time=$(date -Is)"
+        echo "$msg" | tee /dev/console > "$FAILED_FILE"
+        chmod 644 "$FAILED_FILE" || true
+        exit "$rc"
+      }
+      trap on_fail ERR
+
+      echo "minimal setup started $(date -Is)"
+      echo "stack_label=${STACK_LABEL}" >/etc/dozilab/example.conf
+
+      if [[ -s /etc/dozilab/user.json.payload ]]; then
+        bytes="$(wc -c </etc/dozilab/user.json.payload)"
+        echo "user_json payload stored (${bytes} bytes)"
+      fi
+
+      cat >/etc/motd <<EOF
+      DoziLab Minimal Ubuntu Beispiel-App
+      Stack: ${STACK_LABEL}
+      EOF
+
+      msg="DOZILAB_READY stack=${STACK_LABEL} time=$(date -Is)"
+      echo "$msg" | tee /dev/console > "$READY_FILE"
+      chmod 644 "$READY_FILE"
+      echo "minimal setup finished $(date -Is)"
+
+runcmd:
+  - [ bash, -lc, "/usr/local/bin/dozilab-minimal-setup.sh" ]
+
+final_message: "DoziLab Minimal Ubuntu Beispiel-App: cloud-init finished"
