@@ -1,0 +1,695 @@
+---
+- name: DoziLab Ansible PostgreSQL Group DB Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_stack_label: "{{ stack_label | default('sql') }}"
+    dozilab_user_json_payload: "{{ user_json | default('{}') }}"
+    dozilab_mark_dir: /var/lib/dozilab
+    dozilab_user_json_payload_path: /etc/dozilab/user.json.payload
+    dozilab_user_json_path: /etc/dozilab/user.json
+    dozilab_postgres_log: /var/log/dozilab-postgres-ansible.log
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - dozilab_stack_label is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfüllen."
+
+    - name: DoziLab Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "/etc/dozilab", mode: "0700" }
+        - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
+
+    - name: user_json Payload schreiben
+      copy:
+        dest: "{{ dozilab_user_json_payload_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: "{{ dozilab_user_json_payload }}\n"
+      no_log: true
+
+    - name: user_json normalisieren und validieren
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import ast
+        import base64
+        import json
+        import re
+        import sys
+        from pathlib import Path
+
+        payload_path = Path("/etc/dozilab/user.json.payload")
+        out_path = Path("/etc/dozilab/user.json")
+
+        raw = payload_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            sys.exit("user_json payload missing/empty")
+
+        def parse_obj(txt: str):
+            try:
+                return json.loads(txt), "json"
+            except Exception:
+                pass
+            try:
+                return ast.literal_eval(txt), "python-literal"
+            except Exception:
+                return None, None
+
+        def decode_b64(s: str):
+            compact = "".join(s.split())
+            pad = (-len(compact)) % 4
+            compact += "=" * pad
+            try:
+                return base64.b64decode(compact, validate=True).decode("utf-8")
+            except Exception:
+                try:
+                    return base64.b64decode(compact).decode("utf-8")
+                except Exception:
+                    return None
+
+        obj, kind = parse_obj(raw)
+        source = "raw"
+
+        if obj is None:
+            decoded = decode_b64(raw)
+            if decoded is None:
+                sys.exit("user_json payload is neither JSON/literal nor base64-encoded JSON/literal")
+            obj, kind = parse_obj(decoded.strip())
+            if obj is None:
+                sys.exit("user_json base64 decoded, but not valid JSON or python literal")
+            source = "base64"
+
+        if not isinstance(obj, dict):
+            sys.exit("user_json must be an object")
+
+        apps = obj.get("applications")
+        if not isinstance(apps, list):
+            sys.exit("user_json.applications must be a list")
+
+        def find_app(name: str):
+            for a in apps:
+                if isinstance(a, dict) and str(a.get("name", "")).lower() == name:
+                    return a
+            return None
+
+        pg = find_app("postgres") or find_app("postgresql")
+        if not pg:
+            sys.exit("Missing applications[name=postgres]")
+
+        pg_creds = pg.get("credentials")
+        if not isinstance(pg_creds, list) or not pg_creds:
+            sys.exit("postgres.credentials must be a non-empty list")
+
+        ident = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+        group_token = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+
+        used_db_users = set()
+        used_groups = set()
+
+        for c in pg_creds:
+            if not isinstance(c, dict):
+                sys.exit("postgres.credentials entries must be objects")
+
+            gid = c.get("group")
+            if gid is None:
+                sys.exit("postgres credential missing group")
+            gid_s = str(gid).strip()
+            if not gid_s or not group_token.match(gid_s):
+                sys.exit(f"postgres credential group invalid: {gid!r}")
+            if gid_s in used_groups:
+                sys.exit(f"duplicate postgres group not allowed: {gid_s!r}")
+            used_groups.add(gid_s)
+
+            dbn = c.get("database_name") or c.get("db_name")
+            if not isinstance(dbn, str) or not ident.match(dbn):
+                sys.exit(f"postgres credential database_name invalid: {dbn!r}")
+
+            db_user = c.get("db_user")
+            if not isinstance(db_user, str) or not ident.match(db_user):
+                sys.exit(f"postgres credential db_user invalid: {db_user!r}")
+
+            if db_user in used_db_users:
+                sys.exit(f"duplicate postgres db_user not allowed: {db_user!r}")
+            used_db_users.add(db_user)
+
+            pw = c.get("password")
+            if not isinstance(pw, str) or len(pw) < 6:
+                sys.exit(f"postgres credential password too short for {db_user!r} (min 6)")
+
+        admin = pg.get("admin_credentials") or {}
+        if admin:
+            if not isinstance(admin, dict):
+                sys.exit("postgres.admin_credentials must be an object")
+            a_user = admin.get("db_user")
+            a_pw = admin.get("password")
+            if not isinstance(a_user, str) or not ident.match(a_user):
+                sys.exit(f"postgres admin db_user invalid: {a_user!r}")
+            if a_user in used_db_users:
+                sys.exit(f"postgres admin db_user collides with group user: {a_user!r}")
+            if not isinstance(a_pw, str) or len(a_pw) < 6:
+                sys.exit("postgres admin password too short (min 6)")
+
+        pga = find_app("pgadmin")
+        if pga:
+            pga_admin = pga.get("admin_credentials") or {}
+            if not isinstance(pga_admin, dict) or not pga_admin.get("email") or not pga_admin.get("password"):
+                sys.exit("pgadmin.admin_credentials must contain email+password when pgadmin app is present")
+            if "@" not in str(pga_admin.get("email")):
+                sys.exit("pgadmin admin email invalid")
+            if len(str(pga_admin.get("password"))) < 6:
+                sys.exit("pgadmin admin password too short (min 6)")
+
+            pga_creds = pga.get("credentials")
+            if not isinstance(pga_creds, list) or not pga_creds:
+                sys.exit("pgadmin.credentials must be a non-empty list when pgadmin app is present")
+
+            seen_emails = set()
+            for c in pga_creds:
+                if not isinstance(c, dict):
+                    sys.exit("pgadmin.credentials entries must be objects")
+
+                gid = c.get("group")
+                if gid is None:
+                    sys.exit("pgadmin credential missing group")
+                gid_s = str(gid).strip()
+                if not gid_s or not group_token.match(gid_s):
+                    sys.exit(f"pgadmin credential group invalid: {gid!r}")
+
+                email = c.get("email")
+                pw = c.get("password")
+                if not isinstance(email, str) or "@" not in email:
+                    sys.exit(f"pgadmin credential email invalid: {email!r}")
+                if not isinstance(pw, str) or len(pw) < 6:
+                    sys.exit(f"pgadmin credential password too short for {email!r} (min 6)")
+                if email in seen_emails:
+                    sys.exit(f"duplicate pgadmin email not allowed: {email!r}")
+                seen_emails.add(email)
+
+        out_path.write_text(json.dumps(obj, ensure_ascii=True), encoding="utf-8")
+        print(f"user_json normalized OK ({source}, {kind}) -> {out_path}")
+        PY
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: PostgreSQL Version aus user_json lesen
+      shell: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json
+
+        data = json.load(open("/etc/dozilab/user.json", "r", encoding="utf-8"))
+        pgver = data.get("postgres_version")
+        if pgver is None:
+            pgver = data.get("postgresVersion")
+
+        apps = data.get("applications") or []
+        for a in apps:
+            if isinstance(a, dict) and str(a.get("name", "")).lower() in ("postgres", "postgresql"):
+                if a.get("postgres_version") is not None:
+                    pgver = a.get("postgres_version")
+                if a.get("postgresVersion") is not None:
+                    pgver = a.get("postgresVersion")
+
+        if pgver is None or str(pgver).strip() == "":
+            print("")
+        else:
+            print(int(pgver))
+        PY
+      args:
+        executable: /bin/bash
+      register: postgres_version_result
+      changed_when: false
+
+    - name: APT Cache aktualisieren
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: PostgreSQL distro default installieren
+      apt:
+        name:
+          - postgresql
+          - postgresql-client
+          - python3
+        state: present
+      when: postgres_version_result.stdout | trim == ""
+
+    - name: PostgreSQL gewünschte Major-Version installieren
+      apt:
+        name:
+          - "postgresql-{{ postgres_version_result.stdout | trim }}"
+          - postgresql-client
+          - python3
+        state: present
+      when: postgres_version_result.stdout | trim != ""
+
+    - name: Installierte PostgreSQL Major-Version erkennen
+      shell: |
+        set -euo pipefail
+        pg_lsclusters --no-header | awk 'NR==1{print $1}'
+      args:
+        executable: /bin/bash
+      register: detected_pgver
+      changed_when: false
+
+    - name: PostgreSQL Version validieren
+      assert:
+        that:
+          - detected_pgver.stdout | trim | length > 0
+        fail_msg: "Konnte installierte PostgreSQL-Version nicht erkennen."
+
+    - name: PostgreSQL nur auf localhost binden
+      lineinfile:
+        path: "/etc/postgresql/{{ detected_pgver.stdout | trim }}/main/postgresql.conf"
+        regexp: "^#?listen_addresses\\s*="
+        line: "listen_addresses = '127.0.0.1'"
+        backup: true
+
+    - name: pg_hba IPv4 localhost scram sicherstellen
+      lineinfile:
+        path: "/etc/postgresql/{{ detected_pgver.stdout | trim }}/main/pg_hba.conf"
+        line: "host all all 127.0.0.1/32 scram-sha-256"
+        state: present
+
+    - name: pg_hba IPv6 localhost scram sicherstellen
+      lineinfile:
+        path: "/etc/postgresql/{{ detected_pgver.stdout | trim }}/main/pg_hba.conf"
+        line: "host all all ::1/128 scram-sha-256"
+        state: present
+
+    - name: PostgreSQL aktivieren und starten
+      service:
+        name: postgresql
+        enabled: true
+        state: restarted
+
+    - name: Auf PostgreSQL warten
+      shell: |
+        set -euo pipefail
+        for i in $(seq 1 60); do
+          if sudo -u postgres psql -d postgres -Atc "SELECT 1" >/dev/null 2>&1; then
+            exit 0
+          fi
+          sleep 1
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: PostgreSQL Rollen, Datenbanken und Rechte provisionieren
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import re
+        import subprocess
+        import sys
+
+        spec = json.load(open("/etc/dozilab/user.json", "r", encoding="utf-8"))
+        apps = spec.get("applications") or []
+
+        def find_app(name: str):
+            for a in apps:
+                if isinstance(a, dict) and str(a.get("name", "")).lower() == name:
+                    return a
+            return None
+
+        pg = find_app("postgres") or find_app("postgresql")
+        pg_creds = pg.get("credentials") or []
+        pg_admin = pg.get("admin_credentials") or {}
+
+        ident = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+        group_token = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+
+        def run(sql: str, db: str = "postgres", capture: bool = True) -> str:
+            cmd = ["sudo", "-u", "postgres", "psql", "-d", db, "-v", "ON_ERROR_STOP=1", "-Atc", sql]
+            if capture:
+                return subprocess.check_output(cmd, text=True, cwd="/").strip()
+            subprocess.check_call(cmd, cwd="/")
+            return ""
+
+        def q_ident(s: str) -> str:
+            return '"' + s.replace('"', '""') + '"'
+
+        def q_lit(s: str) -> str:
+            return "'" + s.replace("'", "''") + "'"
+
+        def role_exists(name: str) -> bool:
+            return run(f"SELECT 1 FROM pg_roles WHERE rolname={q_lit(name)};") == "1"
+
+        def db_exists(name: str) -> bool:
+            return run(f"SELECT 1 FROM pg_database WHERE datname={q_lit(name)};") == "1"
+
+        def ensure_group_role(role: str) -> None:
+            if not role_exists(role):
+                run(f"CREATE ROLE {q_ident(role)} NOLOGIN;", capture=False)
+
+        def ensure_login_role(role: str, password: str) -> None:
+            if not role_exists(role):
+                run(f"CREATE ROLE {q_ident(role)} LOGIN PASSWORD {q_lit(password)};", capture=False)
+            else:
+                run(f"ALTER ROLE {q_ident(role)} LOGIN PASSWORD {q_lit(password)};", capture=False)
+
+        def ensure_db(dbname: str, owner: str) -> None:
+            if not db_exists(dbname):
+                run(f"CREATE DATABASE {q_ident(dbname)} OWNER {q_ident(owner)};", capture=False)
+            run(f"ALTER DATABASE {q_ident(dbname)} OWNER TO {q_ident(owner)};", capture=False)
+
+        def lock_down_db(dbname: str, grp_role: str) -> None:
+            run(f"REVOKE ALL ON DATABASE {q_ident(dbname)} FROM PUBLIC;", capture=False)
+            run(f"GRANT CONNECT, TEMPORARY ON DATABASE {q_ident(dbname)} TO {q_ident(grp_role)};", capture=False)
+            run("REVOKE CREATE ON SCHEMA public FROM PUBLIC;", db=dbname, capture=False)
+            run("REVOKE USAGE ON SCHEMA public FROM PUBLIC;", db=dbname, capture=False)
+            run(f"GRANT USAGE, CREATE ON SCHEMA public TO {q_ident(grp_role)};", db=dbname, capture=False)
+
+        def grant_group_defaults(dbname: str, creator_role: str, grp_role: str) -> None:
+            run(
+                f"ALTER DEFAULT PRIVILEGES FOR ROLE {q_ident(creator_role)} IN SCHEMA public "
+                f"GRANT ALL PRIVILEGES ON TABLES TO {q_ident(grp_role)};",
+                db=dbname,
+                capture=False,
+            )
+            run(
+                f"ALTER DEFAULT PRIVILEGES FOR ROLE {q_ident(creator_role)} IN SCHEMA public "
+                f"GRANT ALL PRIVILEGES ON SEQUENCES TO {q_ident(grp_role)};",
+                db=dbname,
+                capture=False,
+            )
+
+        def grant_role(grp_role: str, user: str) -> None:
+            run(f"GRANT {q_ident(grp_role)} TO {q_ident(user)};", capture=False)
+
+        groups = {}
+        for c in pg_creds:
+            gid = str(c.get("group")).strip()
+            if not gid or not group_token.match(gid):
+                sys.exit(f"Invalid group token: {gid!r}")
+
+            dbname = c.get("database_name") or c.get("db_name")
+            db_user = c.get("db_user")
+            pw = c.get("password")
+
+            if not isinstance(dbname, str) or not ident.match(dbname):
+                sys.exit(f"Invalid database_name for group {gid}: {dbname!r}")
+            if not isinstance(db_user, str) or not ident.match(db_user):
+                sys.exit(f"Invalid db_user for group {gid}: {db_user!r}")
+            if not isinstance(pw, str) or len(pw) < 6:
+                sys.exit(f"Invalid password for db_user {db_user!r} (min 6)")
+            if gid in groups:
+                sys.exit(f"Duplicate group in postgres.credentials: {gid!r}")
+
+            groups[gid] = {
+                "dbname": dbname,
+                "db_user": db_user,
+                "password": pw,
+            }
+
+        for gid, info in groups.items():
+            grp_role = f"grp_{gid}"
+            ensure_group_role(grp_role)
+            ensure_db(info["dbname"], grp_role)
+            lock_down_db(info["dbname"], grp_role)
+
+        for gid, info in groups.items():
+            grp_role = f"grp_{gid}"
+            db_user = info["db_user"]
+            ensure_login_role(db_user, info["password"])
+            grant_role(grp_role, db_user)
+            grant_group_defaults(info["dbname"], db_user, grp_role)
+
+        if isinstance(pg_admin, dict) and pg_admin:
+            a_user = pg_admin.get("db_user")
+            a_pw = pg_admin.get("password")
+            if a_user and a_pw:
+                if not isinstance(a_user, str) or not ident.match(a_user):
+                    sys.exit(f"Invalid postgres admin db_user: {a_user!r}")
+                if not isinstance(a_pw, str) or len(a_pw) < 6:
+                    sys.exit("Invalid postgres admin password (min 6)")
+
+                ensure_login_role(a_user, a_pw)
+                for gid, info in groups.items():
+                    grp_role = f"grp_{gid}"
+                    grant_role(grp_role, a_user)
+                    grant_group_defaults(info["dbname"], a_user, grp_role)
+
+        print(f"Provisioned postgres groups: {len(groups)}")
+        PY
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Prüfen ob pgAdmin in user_json vorhanden ist
+      shell: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json
+
+        spec = json.load(open("/etc/dozilab/user.json", "r", encoding="utf-8"))
+        apps = spec.get("applications") or []
+
+        present = any(
+            isinstance(a, dict) and str(a.get("name", "")).lower() == "pgadmin"
+            for a in apps
+        )
+
+        print("true" if present else "false")
+        PY
+      args:
+        executable: /bin/bash
+      register: pgadmin_present_result
+      changed_when: false
+
+    - name: pgAdmin Basis-Pakete installieren
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - apache2
+          - libapache2-mod-wsgi-py3
+        state: present
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: Ubuntu Codename ermitteln
+      command: lsb_release -cs
+      register: ubuntu_codename
+      changed_when: false
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: pgAdmin APT Key und Repository konfigurieren
+      shell: |
+        set -euo pipefail
+
+        install -d -m 0755 /etc/apt/keyrings
+
+        if [ ! -f /etc/apt/keyrings/pgadmin.gpg ]; then
+          curl -fsS https://www.pgadmin.org/static/packages_pgadmin_org.pub \
+            | gpg --dearmor -o /etc/apt/keyrings/pgadmin.gpg
+        fi
+
+        echo "deb [signed-by=/etc/apt/keyrings/pgadmin.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/{{ ubuntu_codename.stdout | trim }} pgadmin4 main" \
+          > /etc/apt/sources.list.d/pgadmin4.list
+      args:
+        executable: /bin/bash
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: APT Cache nach pgAdmin Repository aktualisieren
+      apt:
+        update_cache: true
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: pgAdmin Web installieren
+      apt:
+        name: pgadmin4-web
+        state: present
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: pgAdmin Admin Credentials schreiben
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import shlex
+        import sys
+
+        spec = json.load(open("/etc/dozilab/user.json", "r", encoding="utf-8"))
+        apps = spec.get("applications") or []
+
+        def get_app(name):
+            for a in apps:
+                if isinstance(a, dict) and str(a.get("name", "")).lower() == name:
+                    return a
+            return None
+
+        pga = get_app("pgadmin") or {}
+        admin = pga.get("admin_credentials") or {}
+
+        email = admin.get("email")
+        pw = admin.get("password")
+
+        if not email or not pw:
+            sys.exit("pgadmin.admin_credentials missing email/password")
+        if "@" not in email:
+            sys.exit(f"pgAdmin admin email invalid: {email!r}")
+        if len(pw) < 6:
+            sys.exit("pgAdmin admin password too short (min 6)")
+
+        with open("/etc/default/pgadmin4", "w", encoding="utf-8") as f:
+            print(f"PGADMIN_SETUP_EMAIL={shlex.quote(email)}", file=f)
+            print(f"PGADMIN_SETUP_PASSWORD={shlex.quote(pw)}", file=f)
+
+        print("pgAdmin admin email:", email)
+        PY
+
+        chmod 600 /etc/default/pgadmin4
+      args:
+        executable: /bin/bash
+      no_log: true
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: pgAdmin Web Setup ausführen
+      shell: |
+        set -euo pipefail
+
+        rm -f /var/lib/pgadmin/pgadmin4.db
+        rm -rf /var/lib/pgadmin/sessions /var/lib/pgadmin/storage
+        install -d -m 0750 -o www-data -g www-data /var/lib/pgadmin
+
+        set -a
+        . /etc/default/pgadmin4
+        set +a
+
+        PGADMIN_SETUP_EMAIL="$PGADMIN_SETUP_EMAIL" \
+        PGADMIN_SETUP_PASSWORD="$PGADMIN_SETUP_PASSWORD" \
+          /usr/pgadmin4/bin/setup-web.sh --yes
+
+        a2enconf pgadmin4 || true
+        systemctl reload apache2 || true
+      args:
+        executable: /bin/bash
+      no_log: true
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: pgAdmin User aus user_json anlegen
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import subprocess
+        import sys
+
+        spec = json.load(open("/etc/dozilab/user.json", "r", encoding="utf-8"))
+        apps = spec.get("applications") or []
+
+        def get_app(name):
+            for a in apps:
+                if isinstance(a, dict) and str(a.get("name", "")).lower() == name:
+                    return a
+            return None
+
+        pga = get_app("pgadmin") or {}
+        creds = pga.get("credentials") or []
+
+        if not isinstance(creds, list):
+            sys.exit("pgadmin.credentials must be a list")
+
+        accounts = []
+        seen = set()
+
+        for c in creds:
+            if not isinstance(c, dict):
+                continue
+            email = c.get("email")
+            pw = c.get("password")
+            if not email or not pw:
+                continue
+            if email in seen:
+                continue
+            seen.add(email)
+            accounts.append((email, pw))
+
+        created = 0
+
+        for email, pw in accounts:
+            cmd = [
+                "sudo",
+                "-u",
+                "www-data",
+                "/usr/pgadmin4/venv/bin/python",
+                "/usr/pgadmin4/web/setup.py",
+                "add-user",
+                email,
+                pw,
+                "--role",
+                "User",
+                "--active",
+            ]
+
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+            out = (res.stdout or "").strip()
+            if res.returncode == 0:
+                created += 1
+                print(f"created pgAdmin user: {email}")
+            elif "already exists" in out.lower():
+                print(f"pgAdmin user already exists: {email}")
+            else:
+                print(f"WARNING: failed to create pgAdmin user {email} rc={res.returncode} out={out}")
+
+        print(f"pgAdmin accounts processed: {len(accounts)}, created: {created}")
+        PY
+      args:
+        executable: /bin/bash
+      no_log: true
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: Apache aktivieren und starten
+      service:
+        name: apache2
+        enabled: true
+        state: started
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: "DOZILAB_READY stack={{ dozilab_stack_label }} time={{ ansible_facts.date_time.iso8601 }}\n"
+
+    - name: Fail Marker entfernen falls vorhanden
+      file:
+        path: "{{ dozilab_mark_dir }}/failed"
+        state: absent
+
+    - name: Abschluss anzeigen
+      debug:
+        msg:
+          - "DoziLab PostgreSQL Setup OK"
+          - "Stack: {{ dozilab_stack_label }}"
+          - "PostgreSQL Version: {{ detected_pgver.stdout | trim }}"
+          - "pgAdmin enabled: {{ pgadmin_present_result.stdout | trim }}"

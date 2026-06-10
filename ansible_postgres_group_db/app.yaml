@@ -1,0 +1,151 @@
+app:
+  name: ansible-postgres-group-db
+  label: Ansible PostgreSQL Group DB
+  version: 2.0.0
+  description: >
+    Ubuntu VM mit PostgreSQL, Gruppen-Datenbanken, Teacher-Zugriff und optionalem pgAdmin.
+    Infrastruktur wird per Heat erstellt, Konfiguration läuft per Ansible.
+  owner_team: dozilab-app-team
+
+# ------------------------------------------------------------------------------
+# Parameter
+# ------------------------------------------------------------------------------
+parameters:
+
+  # --- Schritt 1: Template ---
+
+  - name: stack_label
+    label: Stack-Label
+    step: template
+    type: string
+    default: sql
+    required: true
+    description: "Kurzes Label für diesen Stack, z.B. sql-2026-01."
+
+  # --- Schritt 2: Konfiguration ---
+
+  - name: image
+    label: Betriebssystem-Image
+    step: konfiguration
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+    required: true
+    enum:
+      - "Ubuntu 22.04 2025-01"
+      - "Ubuntu 24.04 2025-01"
+      - "Ubuntu 24.04 2026-01"
+
+  - name: flavor
+    label: VM-Größe (Flavor)
+    step: konfiguration
+    type: string
+    default: "gp1.small"
+    required: true
+    enum:
+      - "gp1.small"
+      - "gp1.medium"
+
+  - name: volume_size
+    label: Speicher (GB)
+    step: konfiguration
+    type: number
+    default: 8
+    required: true
+    enum:
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+    description: "Größe der Root-Disk als Cinder-Volume. Für lokale Tests kann ein no-volume Heat-Template verwendet werden."
+
+  # --- Schritt 3: Netzwerk ---
+
+  - name: ssh_cidr
+    label: SSH-Zugriff (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "Nur dieses Netz darf per SSH zugreifen. Standard: DHBW/VPN."
+
+  - name: web_cidr
+    label: pgAdmin-Zugriff (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "Nur dieses Netz darf pgAdmin über HTTP Port 80 erreichen."
+
+  # --- Plattform-fest / hidden ---
+
+  - name: network
+    label: Internes Netzwerk
+    step: netzwerk
+    type: string
+    default: "NAT"
+    hidden: true
+    description: "Internes OpenStack-Netzwerk."
+
+  - name: external_network
+    label: Externes Netzwerk
+    step: netzwerk
+    type: string
+    default: "DHBW"
+    hidden: true
+    description: "Floating-IP-Netzwerk."
+
+  - name: key_name
+    label: Admin SSH-Key
+    step: zugriff
+    type: string
+    default: "heat-bastion-key"
+    hidden: true
+    description: "Admin/support SSH keypair."
+
+  # Wird vom Backend erzeugt und als Ansible-Variable verwendet.
+  # Für manuelle Tests schreiben wir es später in /tmp/ansible-postgres-vars.yml.
+  - name: user_json
+    label: Kurs-Spezifikation
+    step: zugriff
+    type: string
+    default: "{}"
+    hidden: true
+    required: true
+    description: "Backend-generiertes JSON oder Base64-JSON mit Postgres-/pgAdmin-Credentials."
+
+# ------------------------------------------------------------------------------
+# Outputs
+# ------------------------------------------------------------------------------
+outputs:
+  - name: ssh_user
+    label: SSH User
+    from_heat_output: ssh_user
+
+  - name: floating_ip
+    label: Floating IP
+    from_heat_output: floating_ip
+
+  - name: private_ip
+    label: Private IP
+    from_heat_output: private_ip
+
+  - name: server_id
+    label: Server ID
+    from_heat_output: server_id
+
+  - name: pgadmin_url
+    label: pgAdmin URL
+    from_heat_output: pgadmin_url
+
+  - name: ssh_hint
+    label: SSH Hint
+    from_heat_output: ssh_hint
+
+  - name: ssh_tunnel_hint
+    label: PostgreSQL SSH Tunnel
+    from_heat_output: ssh_tunnel_hint
+
+  - name: root_volume_id
+    label: Root Volume ID
+    from_heat_output: root_volume_id
