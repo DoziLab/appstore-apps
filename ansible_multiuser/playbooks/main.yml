@@ -1,0 +1,133 @@
+---
+# DoziLab Ansible Playbook: Multi-User Ubuntu
+#
+# Variablen (vom Backend):
+#   students[].username
+#   students[].linux.password
+#   students[].group_name
+#   stack_label
+#   force_password_change
+#   user_files.aufgabe_pdf.exists
+#   user_files.material_gruppe[group_name].exists
+
+- name: DoziLab Multi-User Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  tasks:
+
+    # --- /opt/dozilab absichern (nur root lesbar, Studenten haben keinen Zugriff) ---
+
+    - name: /opt/dozilab nur für root zugänglich machen
+      file:
+        path:  /opt/dozilab
+        state: directory
+        owner: root
+        group: root
+        mode:  "0700"
+
+    # --- Benutzer anlegen ---
+
+    - name: Student Accounts erstellen
+      user:
+        name:        "{{ item.username }}"
+        shell:       /bin/bash
+        create_home: true
+        state:       present
+      loop: "{{ students }}"
+      no_log: true
+
+    - name: Passwörter setzen
+      user:
+        name:     "{{ item.username }}"
+        password: "{{ item.linux.password | password_hash('sha512') }}"
+        update_password: always
+      loop: "{{ students }}"
+      no_log: true
+
+    - name: Passwort-Änderung beim ersten Login erzwingen
+      command: chage -d 0 {{ item.username }}
+      loop: "{{ students }}"
+      no_log: true
+      when: force_password_change | bool
+
+    - name: Arbeitsverzeichnis erstellen
+      file:
+        path:  "/home/{{ item.username }}/work"
+        state: directory
+        owner: "{{ item.username }}"
+        group: "{{ item.username }}"
+        mode:  "0700"
+      loop: "{{ students }}"
+      no_log: true
+
+    # --- Files aus files/ deployen ---
+
+    - name: .bashrc für jeden Student setzen
+      copy:
+        src:   /opt/dozilab/files/bashrc
+        dest:  "/home/{{ item.username }}/.bashrc"
+        owner: "{{ item.username }}"
+        group: "{{ item.username }}"
+        mode:  "0644"
+        remote_src: true
+      loop: "{{ students }}"
+      no_log: true
+
+    - name: MOTD setzen
+      shell: |
+        sed 's/__STACK_LABEL__/{{ stack_label }}/g' \
+          /opt/dozilab/files/motd > /etc/update-motd.d/99-dozilab
+        chmod +x /etc/update-motd.d/99-dozilab
+
+    # --- Scripts aus scripts/ deployen ---
+
+    - name: Scripts ausführbar machen
+      file:
+        path:  "{{ item }}"
+        mode:  "0755"
+      loop:
+        - /opt/dozilab/scripts/check_student_setup.sh
+        - /opt/dozilab/scripts/reset_password.sh
+
+    - name: Student-Setup verifizieren
+      command: /opt/dozilab/scripts/check_student_setup.sh {{ item.username }}
+      loop: "{{ students }}"
+      register: check_result
+      changed_when: false
+      no_log: true
+
+    # --- User Files ---
+
+    - name: Aufgabenstellung in Arbeitsverzeichnis kopieren
+      copy:
+        src:   /opt/dozilab/user-files/aufgabe.pdf
+        dest:  "/home/{{ item.username }}/work/aufgabe.pdf"
+        owner: "{{ item.username }}"
+        mode:  "0644"
+        remote_src: true
+      loop: "{{ students }}"
+      no_log: true
+      when: user_files.aufgabe_pdf.exists | default(false)
+
+    - name: Gruppenverzeichnis für Material erstellen
+      file:
+        path:  "/home/{{ item.username }}/work/material"
+        state: directory
+        owner: "{{ item.username }}"
+        mode:  "0700"
+      loop: "{{ students }}"
+      no_log: true
+      when: user_files.material_gruppe[item.group_name].exists | default(false)
+
+    - name: Gruppenmaterial in Arbeitsverzeichnis kopieren
+      copy:
+        src:   "/opt/dozilab/user-files/{{ item.group_name }}/material"
+        dest:  "/home/{{ item.username }}/work/material/"
+        owner: "{{ item.username }}"
+        mode:  "0600"
+        remote_src: true
+      loop: "{{ students }}"
+      no_log: true
+      when: user_files.material_gruppe[item.group_name].exists | default(false)
