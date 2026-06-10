@@ -7,6 +7,11 @@
 #   students[].group_name
 #   stack_label
 #   force_password_change
+#   workdir
+#   pw_min_length
+#   pw_require_digit
+#   pw_require_upper
+#   pw_require_special
 #   user_files.aufgabe_pdf.exists
 #   user_files.material_gruppe[group_name].exists
 
@@ -15,32 +20,101 @@
   remote_user: ubuntu
   become: true
 
-  tasks:
+  vars:
+    dozilab_workdir: "{{ workdir | default('work') }}"
+    dozilab_pw_min_length: "{{ pw_min_length | default(12) }}"
+    dozilab_pw_require_digit: "{{ pw_require_digit | default(true) }}"
+    dozilab_pw_require_upper: "{{ pw_require_upper | default(true) }}"
+    dozilab_pw_require_special: "{{ pw_require_special | default(true) }}"
 
-    # --- /opt/dozilab absichern (nur root lesbar, Studenten haben keinen Zugriff) ---
+  tasks:
+    - name: Arbeitsordner-Parameter validieren
+      assert:
+        that:
+          - dozilab_workdir is match('^[A-Za-z0-9._-]{1,32}$')
+        fail_msg: "Invalid workdir. Allowed pattern: ^[A-Za-z0-9._-]{1,32}$"
+
+    - name: Passwort-Mindestlänge validieren
+      assert:
+        that:
+          - (dozilab_pw_min_length | int) >= 4
+          - (dozilab_pw_min_length | int) <= 128
+        fail_msg: "pw_min_length must be between 4 and 128."
+
+    - name: Benötigte Pakete installieren
+      apt:
+        name:
+          - libpam-pwquality
+          - python3
+          - cloud-guest-utils
+        state: present
+        update_cache: true
+
+    - name: Passwort-Policy Variablen berechnen
+      set_fact:
+        pw_dcredit: "{{ '-1' if (dozilab_pw_require_digit | bool) else '0' }}"
+        pw_ucredit: "{{ '-1' if (dozilab_pw_require_upper | bool) else '0' }}"
+        pw_ocredit: "{{ '-1' if (dozilab_pw_require_special | bool) else '0' }}"
+
+    - name: pwquality.conf schreiben
+      copy:
+        dest: /etc/security/pwquality.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by DoziLab (Ansible). NOTE: PAM options override this file.
+          minlen = {{ dozilab_pw_min_length | int }}
+          dcredit = {{ pw_dcredit }}
+          ucredit = {{ pw_ucredit }}
+          ocredit = {{ pw_ocredit }}
+          dictcheck = 0
+          usercheck = 0
+          gecoscheck = 0
+          difok = 0
+          maxrepeat = 0
+          minclass = 0
+
+    - name: Prüfen ob pam_pwquality bereits konfiguriert ist
+      command: grep -qE '^\s*password\s+requisite\s+pam_pwquality\.so' /etc/pam.d/common-password
+      register: pam_pwquality_check
+      changed_when: false
+      failed_when: false
+
+    - name: Bestehende pam_pwquality Zeile ersetzen
+      replace:
+        path: /etc/pam.d/common-password
+        regexp: '^\s*password\s+requisite\s+pam_pwquality\.so.*$'
+        replace: "password requisite pam_pwquality.so retry=3 enforce_for_root minlen={{ dozilab_pw_min_length | int }} dcredit={{ pw_dcredit }} ucredit={{ pw_ucredit }} ocredit={{ pw_ocredit }} dictcheck=0 usercheck=0 gecoscheck=0 difok=0 maxrepeat=0 minclass=0"
+      when: pam_pwquality_check.rc == 0
+
+    - name: pam_pwquality vor pam_unix einfügen
+      lineinfile:
+        path: /etc/pam.d/common-password
+        insertbefore: '^\s*password\s+.*pam_unix\.so'
+        line: "password requisite pam_pwquality.so retry=3 enforce_for_root minlen={{ dozilab_pw_min_length | int }} dcredit={{ pw_dcredit }} ucredit={{ pw_ucredit }} ocredit={{ pw_ocredit }} dictcheck=0 usercheck=0 gecoscheck=0 difok=0 maxrepeat=0 minclass=0"
+      when: pam_pwquality_check.rc != 0
 
     - name: /opt/dozilab nur für root zugänglich machen
       file:
-        path:  /opt/dozilab
+        path: /opt/dozilab
         state: directory
         owner: root
         group: root
-        mode:  "0700"
-
-    # --- Benutzer anlegen ---
+        mode: "0700"
 
     - name: Student Accounts erstellen
       user:
-        name:        "{{ item.username }}"
-        shell:       /bin/bash
+        name: "{{ item.username }}"
+        shell: /bin/bash
         create_home: true
-        state:       present
+        state: present
       loop: "{{ students }}"
       no_log: true
 
     - name: Passwörter setzen
       user:
-        name:     "{{ item.username }}"
+        name: "{{ item.username }}"
         password: "{{ item.linux.password | password_hash('sha512') }}"
         update_password: always
       loop: "{{ students }}"
@@ -52,26 +126,52 @@
       no_log: true
       when: force_password_change | bool
 
-    - name: Arbeitsverzeichnis erstellen
+    - name: Home-Verzeichnis absichern
       file:
-        path:  "/home/{{ item.username }}/work"
-        state: directory
+        path: "/home/{{ item.username }}"
         owner: "{{ item.username }}"
         group: "{{ item.username }}"
-        mode:  "0700"
+        mode: "0700"
       loop: "{{ students }}"
       no_log: true
 
-    # --- Files aus files/ deployen ---
+    - name: Arbeitsverzeichnis erstellen
+      file:
+        path: "/home/{{ item.username }}/{{ dozilab_workdir }}"
+        state: directory
+        owner: "{{ item.username }}"
+        group: "{{ item.username }}"
+        mode: "0700"
+      loop: "{{ students }}"
+      no_log: true
+
+    - name: Standard-Login-Verzeichnis in .profile setzen
+      lineinfile:
+        path: "/home/{{ item.username }}/.profile"
+        line: 'cd "$HOME/{{ dozilab_workdir }}"'
+        create: true
+        owner: "{{ item.username }}"
+        group: "{{ item.username }}"
+        mode: "0644"
+      loop: "{{ students }}"
+      no_log: true
 
     - name: .bashrc für jeden Student setzen
       copy:
-        src:   /opt/dozilab/files/bashrc
-        dest:  "/home/{{ item.username }}/.bashrc"
+        src: /opt/dozilab/files/bashrc
+        dest: "/home/{{ item.username }}/.bashrc"
         owner: "{{ item.username }}"
         group: "{{ item.username }}"
-        mode:  "0644"
+        mode: "0644"
         remote_src: true
+      loop: "{{ students }}"
+      no_log: true
+
+    - name: Arbeitsordner in .bashrc ersetzen
+      replace:
+        path: "/home/{{ item.username }}/.bashrc"
+        regexp: "__WORKDIR__"
+        replace: "{{ dozilab_workdir }}"
       loop: "{{ students }}"
       no_log: true
 
@@ -81,31 +181,28 @@
           /opt/dozilab/files/motd > /etc/update-motd.d/99-dozilab
         chmod +x /etc/update-motd.d/99-dozilab
 
-    # --- Scripts aus scripts/ deployen ---
-
     - name: Scripts ausführbar machen
       file:
-        path:  "{{ item }}"
-        mode:  "0755"
+        path: "{{ item }}"
+        mode: "0755"
       loop:
         - /opt/dozilab/scripts/check_student_setup.sh
         - /opt/dozilab/scripts/reset_password.sh
 
     - name: Student-Setup verifizieren
-      command: /opt/dozilab/scripts/check_student_setup.sh {{ item.username }}
+      command: /opt/dozilab/scripts/check_student_setup.sh {{ item.username }} {{ dozilab_workdir }}
       loop: "{{ students }}"
       register: check_result
       changed_when: false
       no_log: true
 
-    # --- User Files ---
-
     - name: Aufgabenstellung in Arbeitsverzeichnis kopieren
       copy:
-        src:   /opt/dozilab/user-files/aufgabe.pdf
-        dest:  "/home/{{ item.username }}/work/aufgabe.pdf"
+        src: /opt/dozilab/user-files/aufgabe.pdf
+        dest: "/home/{{ item.username }}/{{ dozilab_workdir }}/aufgabe.pdf"
         owner: "{{ item.username }}"
-        mode:  "0644"
+        group: "{{ item.username }}"
+        mode: "0644"
         remote_src: true
       loop: "{{ students }}"
       no_log: true
@@ -113,20 +210,22 @@
 
     - name: Gruppenverzeichnis für Material erstellen
       file:
-        path:  "/home/{{ item.username }}/work/material"
+        path: "/home/{{ item.username }}/{{ dozilab_workdir }}/material"
         state: directory
         owner: "{{ item.username }}"
-        mode:  "0700"
+        group: "{{ item.username }}"
+        mode: "0700"
       loop: "{{ students }}"
       no_log: true
       when: user_files.material_gruppe[item.group_name].exists | default(false)
 
     - name: Gruppenmaterial in Arbeitsverzeichnis kopieren
       copy:
-        src:   "/opt/dozilab/user-files/{{ item.group_name }}/material"
-        dest:  "/home/{{ item.username }}/work/material/"
+        src: "/opt/dozilab/user-files/{{ item.group_name }}/material"
+        dest: "/home/{{ item.username }}/{{ dozilab_workdir }}/material/"
         owner: "{{ item.username }}"
-        mode:  "0600"
+        group: "{{ item.username }}"
+        mode: "0600"
         remote_src: true
       loop: "{{ students }}"
       no_log: true

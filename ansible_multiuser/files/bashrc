@@ -17,10 +17,10 @@ alias ll='ls -alF'
 alias la='ls -A'
 alias l='ls -CF'
 alias ..='cd ..'
-alias work='cd ~/work'
+alias work='cd ~/__WORKDIR__'
 
 # Begrüßung beim Login
 echo ""
 echo "  Willkommen, $(whoami)!"
-echo "  Dein Arbeitsverzeichnis: ~/work"
+echo "  Dein Arbeitsverzeichnis: ~/__WORKDIR__"
 echo ""

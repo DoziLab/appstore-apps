@@ -1,32 +1,25 @@
 app:
   name: ansible-multiuser
   label: Ansible Multi-User Ubuntu
-  version: 2.0.0
+  version: 2.1.0
   description: >
     Ubuntu VM mit mehreren Benutzerkonten, verwaltet durch Ansible.
-    Pro Gruppe wird ein Linux-Account mit eigenem Arbeitsverzeichnis erstellt.
+    Pro Student wird ein Linux-Account mit eigenem Arbeitsverzeichnis erstellt.
+    Root disk is a Cinder volume (Boot from Volume) so "Speicher" can be configured.
   owner_team: dozilab-app-team
 
-  # Erlaubt Lehrern im Deployment-Wizard eigene Dateien hochzuladen.
-  # z.B. Aufgabenstellung oder gruppenspezifische Materialien.
   allow_user_files: true
 
-# ------------------------------------------------------------------------------
-# Parameter
-# ------------------------------------------------------------------------------
 parameters:
-
-  # --- Schritt 1: Template ---
-
   - name: stack_label
     label: Stack-Label
     step: template
     type: string
     default: ansible
     required: true
-    description: "Kurzes Label für diesen Stack (z.B. kurs-ws2026)."
-
-  # --- Schritt 2: Konfiguration ---
+    description: >
+      Kurzes Label für diesen Stack (z.B. kurs-ws2026).
+      Muss passen zu: ^[a-z0-9][a-z0-9-]{0,30}$
 
   - name: image
     label: Betriebssystem-Image
@@ -46,10 +39,22 @@ parameters:
     default: "gp1.small"
     required: true
     enum:
-      - "gp1.small"    # 2 vCPU, 4 GB RAM
-      - "gp1.medium"   # 4 vCPU, 8 GB RAM
+      - "gp1.small"
+      - "gp1.medium"
 
-  # --- Schritt 3: Netzwerk ---
+  - name: volume_size
+    label: Speicher (GB)
+    step: konfiguration
+    type: number
+    default: 8
+    enum:
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+    required: true
+    description: "Größe der Root-Disk als Cinder-Volume (Boot from Volume)."
 
   - name: ssh_cidr
     label: SSH-Zugriff (CIDR)
@@ -57,9 +62,9 @@ parameters:
     type: string
     default: "141.72.0.0/16"
     required: true
-    description: "Nur dieses Netz darf per SSH zugreifen. Standard: DHBW/VPN."
-
-  # --- Schritt 4: Zugriff ---
+    description: >
+      Nur dieses Netz darf per SSH zugreifen.
+      Standard: DHBW/VPN. Beispiel: 141.72.0.0/16 oder 1.2.3.4/32.
 
   - name: force_password_change
     label: Passwort-Änderung beim ersten Login erzwingen
@@ -68,14 +73,63 @@ parameters:
     default: true
     required: true
 
-# ------------------------------------------------------------------------------
-# Credentials
-#
-# Studenten bekommen einen Linux-Account für direkten SSH-Zugang.
-# teacher.linux wird automatisch vom Backend generiert.
-# ------------------------------------------------------------------------------
-credentials:
+  - name: workdir
+    label: Arbeitsordner
+    step: zugriff
+    type: string
+    default: "work"
+    required: true
+    description: "Directory created under each student's home and used as default login directory."
 
+  - name: pw_min_length
+    label: Minimale Passwortlänge
+    step: zugriff
+    type: number
+    default: 12
+    required: true
+    description: "Minimum password length enforced via PAM pwquality."
+
+  - name: pw_require_digit
+    label: Ziffer erforderlich
+    step: zugriff
+    type: boolean
+    default: true
+    required: true
+    description: "Require at least one digit."
+
+  - name: pw_require_upper
+    label: Großbuchstabe erforderlich
+    step: zugriff
+    type: boolean
+    default: true
+    required: true
+    description: "Require at least one uppercase letter."
+
+  - name: pw_require_special
+    label: Sonderzeichen erforderlich
+    step: zugriff
+    type: boolean
+    default: true
+    required: true
+    description: "Require at least one special character."
+
+  - name: network
+    label: Internes Netzwerk
+    step: netzwerk
+    type: string
+    default: "NAT"
+    hidden: true
+    description: "Internal network (fixed)."
+
+  - name: external_network
+    label: Externes Netzwerk (Floating IP)
+    step: netzwerk
+    type: string
+    default: "DHBW"
+    hidden: true
+    description: "External/FloatingIP network (fixed)."
+
+credentials:
   per_student:
     - linux:
         username: "{{ username }}"
@@ -84,11 +138,6 @@ credentials:
   teacher:
     # teacher.linux automatisch vorhanden — kein Eintrag nötig
 
-# ------------------------------------------------------------------------------
-# User Files
-#
-# Schritt 5 im Deployment-Wizard zeigt Upload-Felder für diese Dateien.
-# ------------------------------------------------------------------------------
 user_files:
   - name:        aufgabe_pdf
     label:       "Aufgabenstellung (PDF)"
@@ -106,9 +155,6 @@ user_files:
     destination: /opt/dozilab/user-files/{{ group_name }}/material
     mode:        per_group
 
-# ------------------------------------------------------------------------------
-# Outputs
-# ------------------------------------------------------------------------------
 outputs:
   - name: floating_ip
     label: Floating IP
@@ -117,3 +163,11 @@ outputs:
   - name: server_id
     label: Server ID
     from_heat_output: server_id
+
+  - name: ssh_hint
+    label: SSH Hinweis
+    from_heat_output: ssh_hint
+
+  - name: root_volume_id
+    label: Root Volume ID
+    from_heat_output: root_volume_id

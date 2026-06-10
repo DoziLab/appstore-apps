@@ -4,6 +4,7 @@ description: >
   DoziLab Ansible Multi-User VM.
   Nur Infrastruktur — keine user_data, keine cloud-init.
   Konfiguration übernimmt Ansible vom Backend aus per SSH.
+  Root disk is provisioned as a Cinder volume (Boot from Volume) so "Speicher" can be configured.
 
 parameters:
   image:
@@ -14,26 +15,38 @@ parameters:
           - "Ubuntu 22.04 2025-01"
           - "Ubuntu 24.04 2025-01"
           - "Ubuntu 24.04 2026-01"
+    description: "Base image for the VM."
 
   flavor:
     type: string
     default: "gp1.small"
     constraints:
-      - allowed_values: ["gp1.small", "gp1.medium"]
+      - allowed_values:
+          - "gp1.small"
+          - "gp1.medium"
+    description: "VM size. Keep small/medium for student workloads."
+
+  volume_size:
+    type: number
+    default: 8
+    constraints:
+      - range: { min: 8, max: 200 }
+    description: "Root volume size in GB."
 
   ssh_cidr:
     type: string
     default: "141.72.0.0/16"
     constraints:
       - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to SSH and ICMP."
 
   stack_label:
     type: string
     default: "ansible"
     constraints:
       - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
+    description: "Internal label used for resource names/metadata."
 
-  # Plattform-fest — wird vom Backend automatisch gesetzt, nicht in app.yaml exponieren
   network:
     type: string
     default: "NAT"
@@ -48,7 +61,7 @@ parameters:
 
   key_name:
     type: string
-    # Kein Default — Backend setzt immer ANSIBLE_SSH_KEY_NAME aus den Settings
+    description: "Admin/support SSH keypair. Backend should set this from ANSIBLE_SSH_KEY_NAME."
 
 resources:
   secgroup:
@@ -57,11 +70,14 @@ resources:
       description: SSH + ICMP aus erlaubtem CIDR
       rules:
         - direction: ingress
+          ethertype: IPv4
           protocol: tcp
           port_range_min: 22
           port_range_max: 22
           remote_ip_prefix: { get_param: ssh_cidr }
+
         - direction: ingress
+          ethertype: IPv4
           protocol: icmp
           remote_ip_prefix: { get_param: ssh_cidr }
 
@@ -72,19 +88,42 @@ resources:
       security_groups:
         - { get_resource: secgroup }
 
+  root_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: "dozilab-STACK-root"
+          params:
+            STACK: { get_param: stack_label }
+      size: { get_param: volume_size }
+      image: { get_param: image }
+      metadata:
+        dozilab_stack_label: { get_param: stack_label }
+
   server:
     type: OS::Nova::Server
     properties:
       name:
         str_replace:
-          template: "dozilab-LABEL"
+          template: "dozilab-STACK"
           params:
-            LABEL: { get_param: stack_label }
-      image:    { get_param: image }
-      flavor:   { get_param: flavor }
+            STACK: { get_param: stack_label }
+
+      flavor: { get_param: flavor }
       key_name: { get_param: key_name }
+
+      block_device_mapping_v2:
+        - boot_index: 0
+          volume_id: { get_resource: root_volume }
+          delete_on_termination: true
+
       networks:
         - port: { get_resource: port }
+
+      metadata:
+        dozilab_stack_label: { get_param: stack_label }
+        dozilab_config_method: "ansible"
 
   fip:
     type: OS::Neutron::FloatingIP
@@ -95,12 +134,25 @@ resources:
     type: OS::Neutron::FloatingIPAssociation
     properties:
       floatingip_id: { get_resource: fip }
-      port_id:       { get_resource: port }
+      port_id: { get_resource: port }
 
 outputs:
   floating_ip:
+    description: "Public floating IP address."
     value: { get_attr: [fip, floating_ip_address] }
 
   server_id:
+    description: "Nova server ID."
     value: { get_resource: server }
 
+  ssh_hint:
+    description: "Students login like: ssh <username>@<floating_ip>"
+    value:
+      str_replace:
+        template: "ssh <username>@FIP"
+        params:
+          FIP: { get_attr: [fip, floating_ip_address] }
+
+  root_volume_id:
+    description: "Cinder root volume ID."
+    value: { get_resource: root_volume }
