@@ -130,11 +130,12 @@ parameters:
     description: "External/FloatingIP network (fixed)."
 
 credentials:
-  per_student:
+  per_group:
     - linux:
         username: "{{ username }}"
         password: generate
-
+        ssh_key: generate
+        
   teacher:
     # teacher.linux automatisch vorhanden — kein Eintrag nötig
 
