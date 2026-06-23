@@ -4,11 +4,26 @@ app:
   version: 2.1.0
   description: >
     Ubuntu VM mit mehreren Benutzerkonten, verwaltet durch Ansible.
-    Pro Student wird ein Linux-Account mit eigenem Arbeitsverzeichnis erstellt.
+    Pro Gruppe wird ein Linux-Account mit eigenem Arbeitsverzeichnis erstellt.
     Root disk is a Cinder volume (Boot from Volume) so "Speicher" can be configured.
   owner_team: dozilab-app-team
 
   allow_user_files: true
+
+# Maps each role-bearing file in this folder to its FileType so the backend's
+# GitHub-import wiring picks them up at deploy time. Without this block every
+# file is imported as OTHER and the deploy pipeline finds no Heat template
+# and no playbook. ``heat_template`` is also marked as the primary file
+# (deployment entrypoint).
+#
+# Caveat: ``artifacts:`` is single-file-per-key today. Files under ``files/``
+# (bashrc, motd) and ``scripts/`` (check_student_setup.sh, reset_password.sh)
+# cannot be typed via this block — they stay OTHER. If the playbook depends
+# on them being on the VM, fetch them from this repo inside the playbook
+# (cloud-init / ansible.builtin.git / inline content).
+artifacts:
+  heat_template:    heat/main.yaml
+  ansible_playbook: playbooks/main.yml
 
 parameters:
   - name: stack_label
@@ -79,7 +94,7 @@ parameters:
     type: string
     default: "work"
     required: true
-    description: "Directory created under each student's home and used as default login directory."
+    description: "Directory created under each group user's home and used as default login directory."
 
   - name: pw_min_length
     label: Minimale Passwortlänge
@@ -135,7 +150,7 @@ credentials:
         username: "{{ username }}"
         password: generate
         ssh_key: generate
-        
+
   teacher:
     # teacher.linux automatisch vorhanden — kein Eintrag nötig
 
