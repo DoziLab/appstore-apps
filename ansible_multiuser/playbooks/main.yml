@@ -2,9 +2,11 @@
 # DoziLab Ansible Playbook: Multi-User Ubuntu
 #
 # Variablen (vom Backend):
-#   students[].username
-#   students[].linux.password
-#   students[].group_name
+#   groups[].username                          # sanitized Linux-User pro Gruppe
+#   groups[].linux.password
+#   groups[].linux.ssh_key.public_key          # optional (nur wenn app.yaml: ssh_key: generate)
+#   groups[].linux.ssh_key.private_key         # optional, nur informativ — wird NICHT auf die VM kopiert
+#   groups[].group_name                        # Original-Gruppenname (für user_files-Lookup)
 #   stack_label
 #   force_password_change
 #   workdir
@@ -103,13 +105,13 @@
         group: root
         mode: "0700"
 
-    - name: Student Accounts erstellen
+    - name: Gruppen-Linux-Accounts erstellen
       user:
         name: "{{ item.username }}"
         shell: /bin/bash
         create_home: true
         state: present
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
 
     - name: Passwörter setzen
@@ -117,12 +119,26 @@
         name: "{{ item.username }}"
         password: "{{ item.linux.password | password_hash('sha512') }}"
         update_password: always
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
+      no_log: true
+
+    - name: Gruppen-SSH-Public-Key in authorized_keys installieren
+      # Backend generiert per app.yaml `ssh_key: generate` ein Ed25519-Keypair
+      # pro Gruppe. Der Public-Key landet hier in ~/.ssh/authorized_keys des
+      # Gruppen-Linux-Users, der Private-Key bleibt in der Backend-DB und wird
+      # via /student-API zum Download bereitgestellt. Task ist no-op für
+      # Gruppen ohne Keypair (z.B. Apps die `ssh_key: generate` nicht setzen).
+      ansible.posix.authorized_key:
+        user:  "{{ item.username }}"
+        key:   "{{ item.linux.ssh_key.public_key }}"
+        state: present
+      loop: "{{ groups }}"
+      when: item.linux.ssh_key is defined and item.linux.ssh_key.public_key is defined
       no_log: true
 
     - name: Passwort-Änderung beim ersten Login erzwingen
       command: chage -d 0 {{ item.username }}
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
       when: force_password_change | bool
 
@@ -132,7 +148,7 @@
         owner: "{{ item.username }}"
         group: "{{ item.username }}"
         mode: "0700"
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
 
     - name: Arbeitsverzeichnis erstellen
@@ -142,7 +158,7 @@
         owner: "{{ item.username }}"
         group: "{{ item.username }}"
         mode: "0700"
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
 
     - name: Standard-Login-Verzeichnis in .profile setzen
@@ -153,10 +169,10 @@
         owner: "{{ item.username }}"
         group: "{{ item.username }}"
         mode: "0644"
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
 
-    - name: .bashrc für jeden Student setzen
+    - name: .bashrc für jeden Gruppen-User setzen
       copy:
         src: /opt/dozilab/files/bashrc
         dest: "/home/{{ item.username }}/.bashrc"
@@ -164,7 +180,7 @@
         group: "{{ item.username }}"
         mode: "0644"
         remote_src: true
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
 
     - name: Arbeitsordner in .bashrc ersetzen
@@ -172,7 +188,7 @@
         path: "/home/{{ item.username }}/.bashrc"
         regexp: "__WORKDIR__"
         replace: "{{ dozilab_workdir }}"
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
 
     - name: MOTD setzen
@@ -189,9 +205,9 @@
         - /opt/dozilab/scripts/check_student_setup.sh
         - /opt/dozilab/scripts/reset_password.sh
 
-    - name: Student-Setup verifizieren
+    - name: Gruppen-Setup verifizieren
       command: /opt/dozilab/scripts/check_student_setup.sh {{ item.username }} {{ dozilab_workdir }}
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       register: check_result
       changed_when: false
       no_log: true
@@ -204,7 +220,7 @@
         group: "{{ item.username }}"
         mode: "0644"
         remote_src: true
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
       when: user_files.aufgabe_pdf.exists | default(false)
 
@@ -215,7 +231,7 @@
         owner: "{{ item.username }}"
         group: "{{ item.username }}"
         mode: "0700"
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
       when: user_files.material_gruppe[item.group_name].exists | default(false)
 
@@ -227,6 +243,6 @@
         group: "{{ item.username }}"
         mode: "0600"
         remote_src: true
-      loop: "{{ students }}"
+      loop: "{{ groups }}"
       no_log: true
       when: user_files.material_gruppe[item.group_name].exists | default(false)
