@@ -16,14 +16,20 @@ app:
 # and no playbook. ``heat_template`` is also marked as the primary file
 # (deployment entrypoint).
 #
-# Caveat: ``artifacts:`` is single-file-per-key today. Files under ``files/``
-# (bashrc, motd) and ``scripts/`` (check_student_setup.sh, reset_password.sh)
-# cannot be typed via this block — they stay OTHER. If the playbook depends
-# on them being on the VM, fetch them from this repo inside the playbook
-# (cloud-init / ansible.builtin.git / inline content).
+# ``shell_scripts`` and ``config_files`` accept a list of paths so that
+# multiple helper scripts (scripts/) and configuration files (files/) get
+# their FileType set correctly — without that, the deploy-side copy step
+# would skip them and the playbook would fail with "file not found" when
+# trying to read /opt/dozilab/files/bashrc or /opt/dozilab/scripts/*.
 artifacts:
   heat_template:    heat/main.yaml
   ansible_playbook: playbooks/main.yml
+  shell_scripts:
+    - scripts/check_student_setup.sh
+    - scripts/reset_password.sh
+  config_files:
+    - files/bashrc
+    - files/motd
 
 parameters:
   - name: stack_label
