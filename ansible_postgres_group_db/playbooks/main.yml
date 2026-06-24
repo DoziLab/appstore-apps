@@ -6,9 +6,7 @@
 
   vars:
     dozilab_stack_label: "{{ stack_label | default('sql') }}"
-    dozilab_user_json_payload: "{{ user_json | default('{}') }}"
     dozilab_mark_dir: /var/lib/dozilab
-    dozilab_user_json_payload_path: /etc/dozilab/user.json.payload
     dozilab_user_json_path: /etc/dozilab/user.json
     dozilab_postgres_log: /var/log/dozilab-postgres-ansible.log
 
@@ -30,67 +28,106 @@
         - { path: "/etc/dozilab", mode: "0700" }
         - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
 
-    - name: user_json Payload schreiben
+    - name: Backend-Credentials validieren
+      assert:
+        that:
+          - deployment_groups is defined
+          - deployment_groups | length > 0
+          - teacher is defined
+          - teacher.postgres is defined
+          - teacher.postgres.db_user is defined
+          - teacher.postgres.password is defined
+          - teacher.pgadmin is defined
+          - teacher.pgadmin.email is defined
+          - teacher.pgadmin.password is defined
+        fail_msg: "Backend-Credentials fehlen. Erwartet werden deployment_groups[].postgres/pgadmin und teacher.postgres/pgadmin."
+      no_log: true
+
+    - name: Gruppen-Credentials validieren
+      assert:
+        that:
+          - item.username is defined
+          - item.username is match('^[a-z_][a-z0-9_]{0,62}$')
+          - item.postgres is defined
+          - item.postgres.database_name is defined
+          - item.postgres.database_name is match('^[a-z_][a-z0-9_]{0,62}$')
+          - item.postgres.db_user is defined
+          - item.postgres.db_user is match('^[a-z_][a-z0-9_]{0,62}$')
+          - item.postgres.password is defined
+          - item.postgres.password | length >= 6
+          - item.pgadmin is defined
+          - item.pgadmin.email is defined
+          - "'@' in item.pgadmin.email"
+          - item.pgadmin.password is defined
+          - item.pgadmin.password | length >= 6
+        fail_msg: "Ungültige Gruppen-Credentials für PostgreSQL/pgAdmin."
+      loop: "{{ deployment_groups }}"
+      no_log: true
+
+    - name: user_json aus Backend-Credentials erzeugen
       copy:
-        dest: "{{ dozilab_user_json_payload_path }}"
+        dest: "{{ dozilab_user_json_path }}"
         owner: root
         group: root
         mode: "0600"
-        content: "{{ dozilab_user_json_payload }}\n"
+        content: |
+          {
+            "course_label": {{ dozilab_stack_label | to_json }},
+            "instance": {},
+            "applications": [
+              {
+                "name": "postgres",
+                "credentials": [
+          {% for g in deployment_groups %}
+                  {
+                    "group": {{ g.username | to_json }},
+                    "database_name": {{ g.postgres.database_name | to_json }},
+                    "db_user": {{ g.postgres.db_user | to_json }},
+                    "password": {{ g.postgres.password | to_json }}
+                  }{% if not loop.last %},{% endif %}
+          {% endfor %}
+                ],
+                "admin_credentials": {
+                  "db_user": {{ teacher.postgres.db_user | to_json }},
+                  "password": {{ teacher.postgres.password | to_json }}
+                }
+              },
+              {
+                "name": "pgadmin",
+                "credentials": [
+          {% for g in deployment_groups %}
+                  {
+                    "group": {{ g.username | to_json }},
+                    "email": {{ g.pgadmin.email | to_json }},
+                    "password": {{ g.pgadmin.password | to_json }}
+                  }{% if not loop.last %},{% endif %}
+          {% endfor %}
+                ],
+                "admin_credentials": {
+                  "email": {{ teacher.pgadmin.email | to_json }},
+                  "password": {{ teacher.pgadmin.password | to_json }}
+                }
+              }
+            ]
+          }
       no_log: true
 
-    - name: user_json normalisieren und validieren
+    - name: Erzeugtes user_json validieren
       shell: |
         set -euo pipefail
 
         python3 - <<'PY'
-        import ast
-        import base64
         import json
         import re
         import sys
         from pathlib import Path
 
-        payload_path = Path("/etc/dozilab/user.json.payload")
         out_path = Path("/etc/dozilab/user.json")
 
-        raw = payload_path.read_text(encoding="utf-8").strip()
-        if not raw:
-            sys.exit("user_json payload missing/empty")
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            sys.exit("generated user_json missing/empty")
 
-        def parse_obj(txt: str):
-            try:
-                return json.loads(txt), "json"
-            except Exception:
-                pass
-            try:
-                return ast.literal_eval(txt), "python-literal"
-            except Exception:
-                return None, None
-
-        def decode_b64(s: str):
-            compact = "".join(s.split())
-            pad = (-len(compact)) % 4
-            compact += "=" * pad
-            try:
-                return base64.b64decode(compact, validate=True).decode("utf-8")
-            except Exception:
-                try:
-                    return base64.b64decode(compact).decode("utf-8")
-                except Exception:
-                    return None
-
-        obj, kind = parse_obj(raw)
-        source = "raw"
-
-        if obj is None:
-            decoded = decode_b64(raw)
-            if decoded is None:
-                sys.exit("user_json payload is neither JSON/literal nor base64-encoded JSON/literal")
-            obj, kind = parse_obj(decoded.strip())
-            if obj is None:
-                sys.exit("user_json base64 decoded, but not valid JSON or python literal")
-            source = "base64"
+        obj = json.loads(out_path.read_text(encoding="utf-8"))
 
         if not isinstance(obj, dict):
             sys.exit("user_json must be an object")
@@ -126,9 +163,11 @@
             gid = c.get("group")
             if gid is None:
                 sys.exit("postgres credential missing group")
+
             gid_s = str(gid).strip()
             if not gid_s or not group_token.match(gid_s):
                 sys.exit(f"postgres credential group invalid: {gid!r}")
+
             if gid_s in used_groups:
                 sys.exit(f"duplicate postgres group not allowed: {gid_s!r}")
             used_groups.add(gid_s)
@@ -153,12 +192,16 @@
         if admin:
             if not isinstance(admin, dict):
                 sys.exit("postgres.admin_credentials must be an object")
+
             a_user = admin.get("db_user")
             a_pw = admin.get("password")
+
             if not isinstance(a_user, str) or not ident.match(a_user):
                 sys.exit(f"postgres admin db_user invalid: {a_user!r}")
+
             if a_user in used_db_users:
                 sys.exit(f"postgres admin db_user collides with group user: {a_user!r}")
+
             if not isinstance(a_pw, str) or len(a_pw) < 6:
                 sys.exit("postgres admin password too short (min 6)")
 
@@ -167,8 +210,10 @@
             pga_admin = pga.get("admin_credentials") or {}
             if not isinstance(pga_admin, dict) or not pga_admin.get("email") or not pga_admin.get("password"):
                 sys.exit("pgadmin.admin_credentials must contain email+password when pgadmin app is present")
+
             if "@" not in str(pga_admin.get("email")):
                 sys.exit("pgadmin admin email invalid")
+
             if len(str(pga_admin.get("password"))) < 6:
                 sys.exit("pgadmin admin password too short (min 6)")
 
@@ -184,22 +229,26 @@
                 gid = c.get("group")
                 if gid is None:
                     sys.exit("pgadmin credential missing group")
+
                 gid_s = str(gid).strip()
                 if not gid_s or not group_token.match(gid_s):
                     sys.exit(f"pgadmin credential group invalid: {gid!r}")
 
                 email = c.get("email")
                 pw = c.get("password")
+
                 if not isinstance(email, str) or "@" not in email:
                     sys.exit(f"pgadmin credential email invalid: {email!r}")
+
                 if not isinstance(pw, str) or len(pw) < 6:
                     sys.exit(f"pgadmin credential password too short for {email!r} (min 6)")
+
                 if email in seen_emails:
                     sys.exit(f"duplicate pgadmin email not allowed: {email!r}")
+
                 seen_emails.add(email)
 
-        out_path.write_text(json.dumps(obj, ensure_ascii=True), encoding="utf-8")
-        print(f"user_json normalized OK ({source}, {kind}) -> {out_path}")
+        print("generated user_json validated OK")
         PY
       args:
         executable: /bin/bash
@@ -483,6 +532,7 @@
           - gnupg
           - apache2
           - libapache2-mod-wsgi-py3
+          - lsb-release
         state: present
       when: pgadmin_present_result.stdout | trim == "true"
 

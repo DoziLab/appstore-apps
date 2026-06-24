@@ -7,6 +7,10 @@ app:
     Infrastruktur wird per Heat erstellt, Konfiguration läuft per Ansible.
   owner_team: dozilab-app-team
 
+artifacts:
+  heat_template: heat/main.yaml
+  ansible_playbook: playbooks/main.yml
+
 # ------------------------------------------------------------------------------
 # Parameter
 # ------------------------------------------------------------------------------
@@ -44,6 +48,14 @@ parameters:
     enum:
       - "gp1.small"
       - "gp1.medium"
+      - "gp1.large"
+      - "mb1.small"
+      - "mb1.medium"
+      - "mb1.large"
+    description: >
+      VM-Größe für PostgreSQL und optional pgAdmin.
+      gp1.small reicht für kleine Kurse und Tests.
+      Für größere Kurse oder pgAdmin-Nutzung sind gp1.medium, gp1.large oder mb1.* sinnvoll.
 
   - name: volume_size
     label: Speicher (GB)
@@ -57,7 +69,7 @@ parameters:
       - 32
       - 64
       - 128
-    description: "Größe der Root-Disk als Cinder-Volume. Für lokale Tests kann ein no-volume Heat-Template verwendet werden."
+    description: "Größe der Root-Disk als Cinder-Volume."
 
   # --- Schritt 3: Netzwerk ---
 
@@ -95,24 +107,29 @@ parameters:
     hidden: true
     description: "Floating-IP-Netzwerk."
 
-  - name: key_name
-    label: Admin SSH-Key
-    step: zugriff
-    type: string
-    default: "heat-bastion-key"
-    hidden: true
-    description: "Admin/support SSH keypair."
 
-  # Wird vom Backend erzeugt und als Ansible-Variable verwendet.
-  # Für manuelle Tests schreiben wir es später in /tmp/ansible-postgres-vars.yml.
-  - name: user_json
-    label: Kurs-Spezifikation
-    step: zugriff
-    type: string
-    default: "{}"
-    hidden: true
-    required: true
-    description: "Backend-generiertes JSON oder Base64-JSON mit Postgres-/pgAdmin-Credentials."
+# ------------------------------------------------------------------------------
+# Credentials
+# ------------------------------------------------------------------------------
+credentials:
+  per_group:
+    - postgres:
+        database_name: "db_{{ username }}"
+        db_user: "{{ username }}"
+        password: generate
+
+    - pgadmin:
+        email: "{{ username }}@dozilab.internal.de"
+        password: generate
+
+  teacher:
+    - postgres:
+        db_user: teacher
+        password: generate
+
+    - pgadmin:
+        email: teacher@dozilab.internal.de
+        password: generate
 
 # ------------------------------------------------------------------------------
 # Outputs

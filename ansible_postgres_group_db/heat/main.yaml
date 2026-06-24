@@ -2,18 +2,11 @@ heat_template_version: 2018-08-31
 
 description: >
   DoziLab Ansible PostgreSQL Group DB VM.
-  Finales Template mit Boot-from-Cinder-Volume.
   Nur Infrastruktur — keine user_data, keine cloud-init.
-  Konfiguration übernimmt Ansible per SSH.
+  Konfiguration übernimmt Ansible vom Backend aus per SSH.
+  Root disk is a Cinder volume (Boot from Volume) so "Speicher" can be configured.
 
 parameters:
-  stack_label:
-    type: string
-    default: "sql"
-    description: Short label used in VM name and outputs
-    constraints:
-      - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
-
   image:
     type: string
     default: "Ubuntu 22.04 2025-01"
@@ -22,6 +15,7 @@ parameters:
           - "Ubuntu 22.04 2025-01"
           - "Ubuntu 24.04 2025-01"
           - "Ubuntu 24.04 2026-01"
+    description: "Base image for the VM."
 
   flavor:
     type: string
@@ -30,25 +24,39 @@ parameters:
       - allowed_values:
           - "gp1.small"
           - "gp1.medium"
+          - "gp1.large"
+          - "mb1.small"
+          - "mb1.medium"
+          - "mb1.large"
+    description: "VM size for PostgreSQL and optional pgAdmin."
 
   volume_size:
     type: number
     default: 8
-    description: Root volume size in GB
     constraints:
       - range: { min: 8, max: 200 }
+    description: "Root volume size in GB."
 
   ssh_cidr:
     type: string
     default: "141.72.0.0/16"
     constraints:
       - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to SSH and ICMP."
 
   web_cidr:
     type: string
     default: "141.72.0.0/16"
     constraints:
       - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to reach pgAdmin over HTTP."
+
+  stack_label:
+    type: string
+    default: "sql"
+    constraints:
+      - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
+    description: "Internal label used for resource names/metadata."
 
   network:
     type: string
@@ -64,17 +72,12 @@ parameters:
 
   key_name:
     type: string
-    default: "heat-bastion-key"
+    description: "Admin/support SSH keypair. Backend should set this from ANSIBLE_SSH_KEY_NAME."
 
 resources:
   secgroup:
     type: OS::Neutron::SecurityGroup
     properties:
-      name:
-        str_replace:
-          template: "dozilab-pg-LABEL"
-          params:
-            LABEL: { get_param: stack_label }
       description: SSH, ICMP und pgAdmin HTTP aus erlaubten CIDRs
       rules:
         - direction: ingress
@@ -111,35 +114,39 @@ resources:
     properties:
       name:
         str_replace:
-          template: "dozilab-pg-LABEL-root"
+          template: "dozilab-pg-STACK-root"
           params:
-            LABEL: { get_param: stack_label }
+            STACK: { get_param: stack_label }
       size: { get_param: volume_size }
       image: { get_param: image }
       metadata:
         dozilab_stack_label: { get_param: stack_label }
-        dozilab_app: ansible-postgres-group-db
+        dozilab_app: "ansible-postgres-group-db"
 
   server:
     type: OS::Nova::Server
     properties:
       name:
         str_replace:
-          template: "dozilab-pg-LABEL"
+          template: "dozilab-pg-STACK"
           params:
-            LABEL: { get_param: stack_label }
+            STACK: { get_param: stack_label }
+
       flavor: { get_param: flavor }
       key_name: { get_param: key_name }
+
       block_device_mapping_v2:
         - boot_index: 0
           volume_id: { get_resource: root_volume }
           delete_on_termination: true
+
       networks:
         - port: { get_resource: port }
+
       metadata:
         dozilab_stack_label: { get_param: stack_label }
-        dozilab_config_method: ansible
-        dozilab_app: ansible-postgres-group-db
+        dozilab_config_method: "ansible"
+        dozilab_app: "ansible-postgres-group-db"
 
   fip:
     type: OS::Neutron::FloatingIP
@@ -154,23 +161,23 @@ resources:
 
 outputs:
   ssh_user:
-    description: SSH username
+    description: "SSH username."
     value: ubuntu
 
   floating_ip:
-    description: Public Floating IP
+    description: "Public floating IP address."
     value: { get_attr: [fip, floating_ip_address] }
 
   private_ip:
-    description: Private IP on tenant network
+    description: "Private IP on tenant network."
     value: { get_attr: [port, fixed_ips, 0, ip_address] }
 
   server_id:
-    description: Nova server ID
+    description: "Nova server ID."
     value: { get_resource: server }
 
   pgadmin_url:
-    description: pgAdmin4 URL
+    description: "pgAdmin4 URL."
     value:
       str_replace:
         template: "http://FIP/pgadmin4/"
@@ -178,7 +185,7 @@ outputs:
           FIP: { get_attr: [fip, floating_ip_address] }
 
   ssh_hint:
-    description: Admin SSH command
+    description: "Admin SSH command."
     value:
       str_replace:
         template: "ssh -i ~/.ssh/heat-bastion-key.pem ubuntu@FIP"
@@ -186,7 +193,7 @@ outputs:
           FIP: { get_attr: [fip, floating_ip_address] }
 
   ssh_tunnel_hint:
-    description: PostgreSQL SSH tunnel command
+    description: "PostgreSQL SSH tunnel command."
     value:
       str_replace:
         template: "ssh -i ~/.ssh/heat-bastion-key.pem -L 5432:127.0.0.1:5432 ubuntu@FIP"
@@ -194,5 +201,5 @@ outputs:
           FIP: { get_attr: [fip, floating_ip_address] }
 
   root_volume_id:
-    description: Cinder root volume ID
+    description: "Cinder root volume ID."
     value: { get_resource: root_volume }
