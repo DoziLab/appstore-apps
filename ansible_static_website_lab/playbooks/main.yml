@@ -1,0 +1,165 @@
+---
+- name: DoziLab Static Website Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_mark_dir: /var/lib/dozilab
+    dozilab_site_root: /var/www/html
+    dozilab_app_name: ansible-static-website-lab
+
+  tasks:
+    - name: DoziLab Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
+        - { path: "{{ dozilab_site_root }}", mode: "0755" }
+
+    - name: Nginx installieren
+      apt:
+        name: nginx
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Standard-Webseite schreiben
+      copy:
+        dest: "{{ dozilab_site_root }}/index.html"
+        owner: www-data
+        group: www-data
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="de">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>DoziLab Static Website Lab</title>
+            <style>
+              :root {
+                color-scheme: light;
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                background: #f4f7fb;
+                color: #18212f;
+              }
+              body {
+                margin: 0;
+                min-height: 100vh;
+                display: grid;
+                place-items: center;
+              }
+              main {
+                width: min(760px, calc(100% - 48px));
+                background: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 8px;
+                padding: 36px;
+                box-shadow: 0 18px 45px rgba(24, 33, 47, 0.08);
+              }
+              h1 {
+                margin: 0 0 12px;
+                font-size: 32px;
+                line-height: 1.15;
+              }
+              p {
+                margin: 0 0 18px;
+                font-size: 17px;
+                line-height: 1.6;
+              }
+              code {
+                display: inline-block;
+                padding: 3px 7px;
+                border-radius: 6px;
+                background: #edf2f7;
+                color: #253247;
+              }
+              .meta {
+                margin-top: 24px;
+                padding-top: 20px;
+                border-top: 1px solid #e4eaf1;
+                color: #526175;
+                font-size: 14px;
+              }
+            </style>
+          </head>
+          <body>
+            <main>
+              <h1>DoziLab Static Website Lab</h1>
+              <p>
+                Diese VM wurde per Heat erstellt und anschliessend per Ansible
+                als Nginx-Webserver konfiguriert.
+              </p>
+              <p>
+                Eigene HTML-, CSS- und JavaScript-Dateien koennen unter
+                <code>/var/www/html</code> abgelegt werden.
+              </p>
+              <div class="meta">
+                App: {{ dozilab_app_name }}<br>
+                Stack: {{ stack_label | default('web') }}
+              </div>
+            </main>
+          </body>
+          </html>
+
+    - name: Nginx Default Site konfigurieren
+      copy:
+        dest: /etc/nginx/sites-available/default
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+
+              root /var/www/html;
+              index index.html;
+
+              server_name _;
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+          }
+      register: nginx_default_site
+
+    - name: Nginx aktivieren und starten
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Nginx-Konfiguration pruefen
+      command: nginx -t
+      changed_when: false
+
+    - name: Nginx neu laden
+      service:
+        name: nginx
+        state: reloaded
+      when: nginx_default_site.changed
+
+    - name: Lokalen HTTP-Endpunkt pruefen
+      uri:
+        url: http://127.0.0.1/
+        status_code: 200
+        return_content: false
+      register: website_check
+      retries: 10
+      delay: 3
+      until: website_check.status == 200
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DOZILAB_READY app={{ dozilab_app_name }} stack={{ stack_label | default('web') }}
