@@ -1,0 +1,529 @@
+---
+# DoziLab Ansible Playbook: Overleaf LaTeX Lab
+#
+# Variablen (vom Backend):
+#   stack_label
+#   overleaf_site_name
+#   overleaf_admin_email
+#   create_overleaf_users
+#   overleaf_user_domain
+#   deployment_groups[]                         # vom Backend gruppiert; App entscheidet NICHT über Verteilung
+#   deployment_groups[].overleaf.email          # optional aus app.yaml credentials.per_group
+#   teacher.linux.{username,password}           # aus _common/base.yml
+#   user_files.latex_vorlage.exists
+#   user_files.material.exists
+#
+# Hinweis:
+#   Die App stellt genau eine Overleaf-Instanz auf genau einer VM bereit.
+#   Ob diese Instanz für eine oder mehrere Gruppen verwendet wird, entscheidet
+#   ausschließlich Backend/Frontend über die Stack-Erzeugung und deployment_groups.
+
+- name: DoziLab Overleaf LaTeX Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    overleaf_dir: /opt/overleaf-toolkit
+    overleaf_site_name_value: "{{ overleaf_site_name | default('DoziLab Overleaf') }}"
+    overleaf_admin_email_value: "{{ overleaf_admin_email | default('admin@dozilab.local') }}"
+    overleaf_create_users: "{{ create_overleaf_users | default(true) }}"
+    overleaf_user_domain_value: "{{ overleaf_user_domain | default('dozilab.local') }}"
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - stack_label is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "Invalid stack_label. Allowed pattern: ^[a-z0-9][a-z0-9-]{0,30}$"
+
+    - name: Overleaf Admin E-Mail validieren
+      assert:
+        that:
+          - overleaf_admin_email_value is match('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$')
+        fail_msg: "Invalid overleaf_admin_email."
+
+    - name: Overleaf Benutzer-Domain validieren
+      assert:
+        that:
+          - overleaf_user_domain_value is match('^[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$|^[A-Za-z0-9.-]+\\.local$')
+        fail_msg: "Invalid overleaf_user_domain."
+      when: overleaf_create_users | bool
+
+    - name: Overleaf Gruppen-Accounts validieren
+      assert:
+        that:
+          - item.username is defined
+          - item.username is match('^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$')
+          - overleaf_group_email is match('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$')
+        fail_msg: "Invalid deployment_groups entry for Overleaf account creation."
+      loop: "{{ deployment_groups | default([]) }}"
+      vars:
+        overleaf_group_email: "{{ item.get('overleaf', {}).get('email') | default(item.get('email') | default(item.username ~ '@' ~ overleaf_user_domain_value, true), true) }}"
+      when: overleaf_create_users | bool
+
+    - name: Alte Ubuntu-Docker-Pakete entfernen
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+          - docker-compose-v2
+          - docker-doc
+          - podman-docker
+        state: absent
+        purge: true
+      failed_when: false
+
+    - name: Basis-Pakete für Docker-Repository installieren
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - git
+          - gnupg
+          - lsb-release
+          - python3
+        state: present
+        update_cache: true
+
+    - name: Docker GPG-Verzeichnis erstellen
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Docker GPG-Key herunterladen
+      get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        owner: root
+        group: root
+        mode: "0644"
+        force: true
+
+    - name: Docker APT-Repository konfigurieren
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable
+   
+    - name: Offizielle Docker-Pakete installieren
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Docker starten und aktivieren
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Docker Version prüfen
+      command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Docker Compose v2 prüfen
+      command: docker compose version
+      register: docker_compose_version
+      changed_when: false
+
+    - name: Lehrer zur docker-Gruppe hinzufügen
+      user:
+        name: "{{ teacher.linux.username }}"
+        groups: docker
+        append: true
+      when: teacher.linux.username is defined
+
+    - name: /opt/dozilab nur für root zugänglich machen
+      file:
+        path: /opt/dozilab
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: /opt/dozilab/latex erstellen
+      file:
+        path: /opt/dozilab/latex
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Standard-LaTeX-Vorlage ablegen
+      copy:
+        src: /opt/dozilab/files/welcome.tex
+        dest: /opt/dozilab/latex/welcome.tex
+        owner: root
+        group: root
+        mode: "0644"
+        remote_src: true
+
+    - name: User-LaTeX-Vorlage übernehmen falls vorhanden
+      copy:
+        src: /opt/dozilab/user-files/template.tex
+        dest: /opt/dozilab/latex/template.tex
+        owner: root
+        group: root
+        mode: "0644"
+        remote_src: true
+      when: user_files.latex_vorlage.exists | default(false)
+
+    - name: Materialordner vorbereiten falls Material hochgeladen wurde
+      file:
+        path: /opt/dozilab/latex/material
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: user_files.material.exists | default(false)
+
+    - name: Materialien übernehmen falls vorhanden
+      copy:
+        src: /opt/dozilab/user-files/material
+        dest: /opt/dozilab/latex/material/
+        owner: root
+        group: root
+        mode: "0644"
+        remote_src: true
+      when: user_files.material.exists | default(false)
+
+    - name: Overleaf Toolkit klonen
+      git:
+        repo: https://github.com/overleaf/toolkit.git
+        dest: "{{ overleaf_dir }}"
+        version: master
+        update: false
+
+    - name: Overleaf Toolkit initialisieren
+      command: ./bin/init
+      args:
+        chdir: "{{ overleaf_dir }}"
+        creates: "{{ overleaf_dir }}/config/overleaf.rc"
+
+    - name: Overleaf Site Name setzen
+      lineinfile:
+        path: "{{ overleaf_dir }}/config/variables.env"
+        regexp: '^OVERLEAF_APP_NAME='
+        line: "OVERLEAF_APP_NAME={{ overleaf_site_name_value }}"
+
+    - name: Overleaf Admin E-Mail als Support-Adresse setzen
+      lineinfile:
+        path: "{{ overleaf_dir }}/config/variables.env"
+        regexp: '^#?OVERLEAF_ADMIN_EMAIL='
+        line: "OVERLEAF_ADMIN_EMAIL={{ overleaf_admin_email_value }}"
+
+    - name: Overleaf Site URL setzen
+      lineinfile:
+        path: "{{ overleaf_dir }}/config/variables.env"
+        regexp: '^#?OVERLEAF_SITE_URL='
+        line: "OVERLEAF_SITE_URL=http://{{ ansible_host | default(inventory_hostname) }}"
+
+    - name: Alte Overleaf Runtime-Konfiguration entfernen
+      lineinfile:
+        path: "{{ overleaf_dir }}/config/overleaf.rc"
+        regexp: "{{ item }}"
+        state: absent
+      loop:
+        - '^(SHARELATEX|OVERLEAF)_LISTEN_IP='
+        - '^(SHARELATEX|OVERLEAF)_PORT='
+        - '^SIBLING_CONTAINERS_ENABLED='
+
+    - name: DoziLab Overleaf Runtime-Konfiguration setzen
+      blockinfile:
+        path: "{{ overleaf_dir }}/config/overleaf.rc"
+        marker: "# {mark} DOZILAB OVERLEAF CONFIG"
+        block: |
+          OVERLEAF_LISTEN_IP=0.0.0.0
+          OVERLEAF_PORT=80
+          SIBLING_CONTAINERS_ENABLED=false
+
+    - name: Overleaf im Hintergrund starten
+      command: ./bin/up -d
+      args:
+        chdir: "{{ overleaf_dir }}"
+      register: overleaf_up
+      retries: 6
+      delay: 30
+      until: overleaf_up.rc == 0
+
+    - name: Warten bis Overleaf HTTP antwortet
+      uri:
+        url: "http://127.0.0.1/"
+        status_code:
+          - 200
+          - 302
+        timeout: 10
+      register: overleaf_http
+      retries: 30
+      delay: 10
+      until: overleaf_http.status in [200, 302]
+
+    - name: Overleaf Admin-Account vorbereiten
+      command:
+        argv:
+          - ./bin/docker-compose
+          - exec
+          - -T
+          - sharelatex
+          - /bin/bash
+          - -ce
+          - |
+            cd /overleaf/services/web
+            set +e
+            output="$(node modules/server-ce-scripts/scripts/create-user --admin --email={{ overleaf_admin_email_value | quote }} 2>&1)"
+            rc="$?"
+            set -e
+            printf '%s\n' "$output"
+            activation_url="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | tail -n 1 || true)"
+            if [ -n "$activation_url" ]; then
+              printf 'DOZILAB_ACTIVATION_URL=%s\n' "$activation_url"
+            fi
+            if printf '%s\n' "$output" | grep -qi 'usage:'; then
+              exit 64
+            fi
+            exit "$rc"
+      args:
+        chdir: "{{ overleaf_dir }}"
+      register: overleaf_admin_create
+      changed_when: "'already exists' not in (((overleaf_admin_create.stdout | default('')) ~ (overleaf_admin_create.stderr | default(''))) | lower)"
+      failed_when: >
+        (
+          overleaf_admin_create.rc != 0 or
+          'usage:' in (((overleaf_admin_create.stdout | default('')) ~ (overleaf_admin_create.stderr | default(''))) | lower)
+        ) and
+        'already exists' not in (((overleaf_admin_create.stdout | default('')) ~ (overleaf_admin_create.stderr | default(''))) | lower)
+      when: overleaf_create_users | bool
+      no_log: true
+
+    - name: Overleaf Gruppen-Accounts vorbereiten
+      command:
+        argv:
+          - ./bin/docker-compose
+          - exec
+          - -T
+          - sharelatex
+          - /bin/bash
+          - -ce
+          - |
+            cd /overleaf/services/web
+            set +e
+            output="$(node modules/server-ce-scripts/scripts/create-user --email={{ overleaf_group_email | quote }} 2>&1)"
+            rc="$?"
+            set -e
+            printf '%s\n' "$output"
+            activation_url="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | tail -n 1 || true)"
+            if [ -n "$activation_url" ]; then
+              printf 'DOZILAB_ACTIVATION_URL=%s\n' "$activation_url"
+            fi
+            if printf '%s\n' "$output" | grep -qi 'usage:'; then
+              exit 64
+            fi
+            exit "$rc"
+      args:
+        chdir: "{{ overleaf_dir }}"
+      loop: "{{ deployment_groups | default([]) }}"
+      vars:
+        overleaf_group_email: "{{ item.get('overleaf', {}).get('email') | default(item.get('email') | default(item.username ~ '@' ~ overleaf_user_domain_value, true), true) }}"
+      register: overleaf_group_create
+      changed_when: "'already exists' not in (((overleaf_group_create.stdout | default('')) ~ (overleaf_group_create.stderr | default(''))) | lower)"
+      failed_when: >
+        (
+          overleaf_group_create.rc != 0 or
+          'usage:' in (((overleaf_group_create.stdout | default('')) ~ (overleaf_group_create.stderr | default(''))) | lower)
+        ) and
+        'already exists' not in (((overleaf_group_create.stdout | default('')) ~ (overleaf_group_create.stderr | default(''))) | lower)
+      when: overleaf_create_users | bool
+      no_log: true
+
+    - name: Overleaf Admin-Aktivierungslink extrahieren
+      set_fact:
+        overleaf_admin_activation_urls: >-
+          {{
+            (
+              ((overleaf_admin_create.stdout | default('')) ~ '\n' ~ (overleaf_admin_create.stderr | default('')))
+              | regex_findall('DOZILAB_ACTIVATION_URL=(https?://[^ \n\r\t<"]+)')
+            )
+          }}
+        overleaf_admin_activation_url: >-
+          {{
+            (
+              (
+                ((overleaf_admin_create.stdout | default('')) ~ '\n' ~ (overleaf_admin_create.stderr | default('')))
+                | regex_findall('DOZILAB_ACTIVATION_URL=(https?://[^ \n\r\t<"]+)')
+              ) | last
+            ) | default('', true)
+          }}
+      when: overleaf_create_users | bool
+      no_log: true
+
+    - name: Overleaf Gruppen-Account-Daten sammeln
+      set_fact:
+        overleaf_group_accounts: "{{ (overleaf_group_accounts | default([])) + [overleaf_group_account] }}"
+      vars:
+        overleaf_group_email: "{{ item.item.get('overleaf', {}).get('email') | default(item.item.get('email') | default(item.item.username ~ '@' ~ overleaf_user_domain_value, true), true) }}"
+        overleaf_group_activation_url: >-
+          {{
+            (
+              (
+                ((item.stdout | default('')) ~ '\n' ~ (item.stderr | default('')))
+                | regex_findall('DOZILAB_ACTIVATION_URL=(https?://[^ \n\r\t<"]+)')
+              ) | last
+            ) | default('', true)
+          }}
+        overleaf_group_account:
+          group: "{{ item.item.group_name | default(item.item.username) }}"
+          username: "{{ item.item.username }}"
+          email: "{{ overleaf_group_email }}"
+          activation_url: "{{ overleaf_group_activation_url }}"
+      loop: "{{ overleaf_group_create.results | default([]) }}"
+      when: overleaf_create_users | bool
+      no_log: true
+
+    - name: Overleaf User-Setup JSON schreiben
+      copy:
+        dest: /opt/dozilab/OVERLEAF_USERS.json
+        owner: root
+        group: root
+        mode: "0600"
+        content: "{{ overleaf_users_json | to_nice_json }}"
+      vars:
+        overleaf_users_json:
+          stack: "{{ stack_label }}"
+          site: "{{ overleaf_site_name_value }}"
+          account_creation_enabled: "{{ overleaf_create_users | bool }}"
+          admin:
+            email: "{{ overleaf_admin_email_value }}"
+            activation_url: "{{ overleaf_admin_activation_url | default('') }}"
+          groups: "{{ overleaf_group_accounts | default([]) }}"
+      when: overleaf_create_users | bool
+      no_log: true
+
+    - name: Overleaf User-Setup-Hinweise schreiben
+      copy:
+        dest: /opt/dozilab/OVERLEAF_USERS.txt
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          DoziLab Overleaf User Setup
+
+          Stack:
+            {{ stack_label }}
+
+          Site:
+            {{ overleaf_site_name_value }}
+
+          Account-Erstellung aktiv:
+            {{ overleaf_create_users }}
+
+          Admin:
+            email: {{ overleaf_admin_email_value }}
+            activation_url: {{ overleaf_admin_activation_url | default('') }}
+
+          Groups:
+          {% for account in overleaf_group_accounts | default([]) %}
+            - group: {{ account.group }}
+              username: {{ account.username }}
+              email: {{ account.email }}
+              activation_url: {{ account.activation_url }}
+          {% endfor %}
+
+          Hinweis:
+            Diese Links sind sensibel und dienen zum initialen Setzen der Passwörter.
+            Wenn kein Mailversand konfiguriert ist, müssen diese Links manuell
+            an die jeweiligen Nutzer/Gruppen verteilt werden.
+      when: overleaf_create_users | bool
+      no_log: true
+
+    - name: Overleaf User-Setup-Hinweise entfernen wenn Automatisierung deaktiviert ist
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/dozilab/OVERLEAF_USERS.txt
+        - /opt/dozilab/OVERLEAF_USERS.json
+      when: not (overleaf_create_users | bool)
+
+    - name: Overleaf Setup prüfen
+      command: /opt/dozilab/scripts/check_overleaf_setup.sh
+      register: overleaf_check
+      changed_when: false
+
+    - name: MOTD setzen
+      shell: |
+        sed \
+          -e 's/__STACK_LABEL__/{{ stack_label }}/g' \
+          -e 's/__OVERLEAF_ADMIN_EMAIL__/{{ overleaf_admin_email_value }}/g' \
+          /opt/dozilab/files/motd > /etc/update-motd.d/99-dozilab-overleaf
+        chmod +x /etc/update-motd.d/99-dozilab-overleaf
+
+    - name: Deployment-Hinweis schreiben
+      copy:
+        dest: /opt/dozilab/OVERLEAF_README.txt
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DoziLab Overleaf LaTeX Lab
+
+          Stack: {{ stack_label }}
+          Site: {{ overleaf_site_name_value }}
+          Admin E-Mail Hinweis: {{ overleaf_admin_email_value }}
+
+          Web:
+            http://<floating-ip>/
+            http://<floating-ip>/launchpad
+
+          Initialer Admin:
+            Wenn create_overleaf_users=true ist, wird der Admin-Account per
+            Overleaf CLI vorbereitet. Es gibt kein vorab gesetztes
+            Overleaf-Passwort.
+
+          Accounts:
+            Wenn create_overleaf_users=true ist, werden Admin- und
+            Gruppen-Accounts per Overleaf CLI vorbereitet.
+
+            Setup-Links:
+              /opt/dozilab/OVERLEAF_USERS.txt
+
+            Diese Links sind sensibel und dienen zum initialen Setzen der
+            Passwoerter.
+
+          Hinweise:
+            - Gruppenverteilung wird durch Backend/Frontend geregelt.
+            - Diese VM enthält genau eine Overleaf-Instanz.
+            - Overleaf Toolkit liegt unter {{ overleaf_dir }}.
+            - Overleaf Community Edition nutzt keine Sibling Containers.
+            - Für echte Nutzer-Isolation mehrere VMs/Stacks verwenden.
+            - Docker wird aus dem offiziellen Docker-APT-Repository installiert.
+            - Docker Compose v2 wird über docker-compose-plugin bereitgestellt.
+
+          Lokale Dateien:
+            /opt/dozilab/latex/welcome.tex
+            /opt/dozilab/latex/template.tex, falls hochgeladen
+            /opt/dozilab/latex/material/, falls hochgeladen
+
+          Verwaltung:
+            cd {{ overleaf_dir }}
+            sudo ./bin/up -d
+            sudo ./bin/stop
+            sudo ./bin/logs
+
+          Diagnose:
+            docker --version
+            docker compose version
+            cd {{ overleaf_dir }}
+            sudo ./bin/doctor
