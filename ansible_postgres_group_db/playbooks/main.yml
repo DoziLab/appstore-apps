@@ -716,11 +716,146 @@
       no_log: true
       when: pgadmin_present_result.stdout | trim == "true"
 
+    - name: pgAdmin Server-Eintraege pro User registrieren
+      # load-servers importiert eine JSON-Datei mit Server-Definitionen
+      # in den Pgadmin-Account eines Users. Passwoerter werden bewusst NICHT
+      # mitimportiert — pgAdmin lehnt das aus Sicherheitsgruenden ab.
+      # Studenten geben das Postgres-Passwort beim ersten Connect ein.
+      # Teacher sieht alle Gruppen-DBs als separate Eintraege.
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        spec = json.load(open("/etc/dozilab/user.json", "r", encoding="utf-8"))
+        apps = spec.get("applications") or []
+
+        def get_app(name):
+            for a in apps:
+                if isinstance(a, dict) and str(a.get("name", "")).lower() == name:
+                    return a
+            return None
+
+        pg = get_app("postgres") or get_app("postgresql") or {}
+        pga = get_app("pgadmin") or {}
+
+        pg_creds = pg.get("credentials") or []
+        pga_creds = pga.get("credentials") or []
+        pga_admin = pga.get("admin_credentials") or {}
+
+        # Build group_index -> {db_user, database_name} from postgres creds
+        groups_by_gid = {}
+        for c in pg_creds:
+            gid = str(c.get("group") or "").strip()
+            if not gid:
+                continue
+            groups_by_gid[gid] = {
+                "db_user": c.get("db_user"),
+                "database_name": c.get("database_name") or c.get("db_name"),
+            }
+
+        def load_servers_for_user(email: str, servers: dict) -> None:
+            """Run pgAdmin's load-servers CLI for a single user."""
+            payload = {"Servers": servers}
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                json.dump(payload, f)
+                tmp_path = f.name
+            try:
+                # Make sure www-data can read it
+                Path(tmp_path).chmod(0o644)
+                cmd = [
+                    "sudo", "-u", "www-data",
+                    "/usr/pgadmin4/venv/bin/python",
+                    "/usr/pgadmin4/web/setup.py",
+                    "load-servers", tmp_path,
+                    "--user", email,
+                ]
+                res = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                out = (res.stdout or "").strip()
+                if res.returncode == 0:
+                    print(f"loaded {len(servers)} server(s) for {email}")
+                else:
+                    print(f"WARNING: load-servers failed for {email} rc={res.returncode} out={out}")
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+
+        # --- Student / group accounts: one server entry per pgAdmin user ---
+        for c in pga_creds:
+            email = c.get("email")
+            gid = str(c.get("group") or "").strip()
+            if not email or not gid:
+                continue
+            group_info = groups_by_gid.get(gid)
+            if not group_info:
+                print(f"WARNING: no postgres credential for group {gid} — skipping {email}")
+                continue
+            servers = {
+                "1": {
+                    "Name": f"Gruppe {gid} DB",
+                    "Group": "Servers",
+                    "Host": "127.0.0.1",
+                    "Port": 5432,
+                    "MaintenanceDB": group_info["database_name"],
+                    "Username": group_info["db_user"],
+                    "SSLMode": "prefer",
+                },
+            }
+            load_servers_for_user(email, servers)
+
+        # --- Teacher: one server entry per group, all with teacher db_user ---
+        teacher_email = pga_admin.get("email")
+        pg_admin = pg.get("admin_credentials") or {}
+        teacher_db_user = pg_admin.get("db_user")
+        if teacher_email and teacher_db_user and groups_by_gid:
+            teacher_servers = {}
+            for i, (gid, info) in enumerate(sorted(groups_by_gid.items()), start=1):
+                teacher_servers[str(i)] = {
+                    "Name": f"Gruppe {gid} DB (teacher)",
+                    "Group": "Gruppen",
+                    "Host": "127.0.0.1",
+                    "Port": 5432,
+                    "MaintenanceDB": info["database_name"],
+                    "Username": teacher_db_user,
+                    "SSLMode": "prefer",
+                }
+            load_servers_for_user(teacher_email, teacher_servers)
+        PY
+      args:
+        executable: /bin/bash
+      no_log: true
+      when: pgadmin_present_result.stdout | trim == "true"
+
     - name: Apache aktivieren und starten
       service:
         name: apache2
         enabled: true
         state: started
+      when: pgadmin_present_result.stdout | trim == "true"
+
+    - name: Auf pgAdmin Login-Seite warten
+      # Pollt die pgAdmin-Login-Seite ueber Apache.
+      # Erst wenn HTTP 200 zurueck kommt, gilt pgAdmin als wirklich bereit —
+      # vorher wuerde der Ready-Marker den Frontend-Status faelschlich auf
+      # "bereit" setzen, obwohl Apache noch 503/404 wirft.
+      uri:
+        url: "http://127.0.0.1/pgadmin4/login"
+        method: GET
+        status_code: 200
+        return_content: false
+      register: pgadmin_ready_check
+      retries: 120
+      delay: 5
+      until: pgadmin_ready_check.status == 200
       when: pgadmin_present_result.stdout | trim == "true"
 
     - name: Ready Marker schreiben
