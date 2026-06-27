@@ -1,0 +1,113 @@
+app:
+  name: owasp-juice-shop-lab
+  label: OWASP Juice Shop Lab
+  version: 1.0.0
+  description: >
+    Deploys an isolated OWASP Juice Shop instance for web security courses.
+    The lab exposes the training app over HTTP and keeps access restricted by CIDR.
+  owner_team: dozilab-app-team
+
+artifacts:
+  heat_template: heat/main.yaml
+  cloud_init: cloud-init/user-data.yaml
+
+parameters:
+  - name: stack_label
+    label: Label
+    step: template
+    type: string
+    default: "juice"
+    required: true
+    description: "Short label for VM names and log markers."
+
+  - name: image
+    label: Image
+    step: konfiguration
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+    enum:
+      - "Ubuntu 22.04 2025-01"
+      - "Ubuntu 24.04 2025-01"
+      - "Ubuntu 24.04 2026-01"
+    required: true
+    description: "Ubuntu image for the VM."
+
+  - name: flavor
+    label: Flavor
+    step: konfiguration
+    type: string
+    default: "gp1.small"
+    enum:
+      - "gp1.small"
+      - "gp1.medium"
+    required: true
+    description: "VM size. gp1.small is enough for a small Juice Shop lab."
+
+  - name: ssh_cidr
+    label: SSH erlaubtes Netz (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "CIDR allowed to SSH."
+
+  - name: web_cidr
+    label: Web erlaubtes Netz (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "CIDR allowed to open the Juice Shop web UI."
+
+  - name: network
+    label: Internes Netzwerk
+    step: netzwerk
+    type: string
+    default: "NAT"
+    hidden: true
+    description: "Internal network."
+
+  - name: external_network
+    label: Externes Netzwerk
+    step: netzwerk
+    type: string
+    default: "DHBW"
+    hidden: true
+    description: "Network used for Floating IPs."
+
+  - name: key_name
+    label: SSH-Key
+    step: zugriff
+    type: string
+    default: "heat-bastion-key"
+    hidden: true
+    description: "SSH key for admin access."
+
+outputs:
+  - name: ssh_user
+    from_heat_output: ssh_user
+    description: "SSH username."
+
+  - name: floating_ip
+    from_heat_output: floating_ip
+    description: "Floating IP of the VM."
+
+  - name: private_ip
+    from_heat_output: private_ip
+    description: "Private IP of the VM."
+
+  - name: server_id
+    from_heat_output: server_id
+    description: "Nova server ID."
+
+  - name: web_url
+    from_heat_output: web_url
+    description: "Juice Shop URL."
+
+  - name: ssh_hint
+    from_heat_output: ssh_hint
+    description: "SSH example command."
+
+  - name: ready_marker
+    from_heat_output: ready_marker
+    description: "Marker in the console log when setup is complete."

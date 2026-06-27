@@ -1,0 +1,636 @@
+---
+- name: DoziLab Ansible Jupyter Data Science Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_stack_label: "{{ stack_label | default('jupyter') }}"
+    dozilab_workdir: "{{ workdir | default('work') }}"
+    dozilab_install_examples: "{{ install_examples | default(true) }}"
+    dozilab_mark_dir: /var/lib/dozilab
+    dozilab_user_json_path: /etc/dozilab/user.json
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - dozilab_stack_label is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfüllen."
+
+    - name: Arbeitsordner validieren
+      assert:
+        that:
+          - dozilab_workdir is match('^[A-Za-z0-9._-]{1,32}$')
+        fail_msg: "workdir muss ^[A-Za-z0-9._-]{1,32}$ erfüllen."
+
+    - name: DoziLab und Jupyter Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "/etc/dozilab", mode: "0700" }
+        - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
+        - { path: "/etc/jupyterhub", mode: "0700" }
+        - { path: "/var/lib/jupyterhub", mode: "0700" }
+        - { path: "/opt/dozilab/notebooks", mode: "0755" }
+
+    - name: Backend-Credentials validieren
+      assert:
+        that:
+          - deployment_groups is defined
+          - deployment_groups | length > 0
+          - teacher is defined
+          - teacher.linux is defined
+          - teacher.linux.username is defined
+          - teacher.linux.username is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - teacher.linux.password is defined
+          - teacher.linux.password | length > 0
+        fail_msg: "Backend-Credentials fehlen. Erwartet werden deployment_groups[].linux und teacher.linux."
+      no_log: true
+
+    - name: Gruppen-Credentials validieren
+      assert:
+        that:
+          - item.username is defined
+          - item.username is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - item.linux is defined
+          - item.linux.password is defined
+          - item.linux.password | length > 0
+        fail_msg: "Ungültige Gruppen-Credentials für Jupyter/Linux."
+      loop: "{{ deployment_groups }}"
+      no_log: true
+
+    - name: user_json aus Backend-Credentials erzeugen
+      copy:
+        dest: "{{ dozilab_user_json_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {
+            "course_label": {{ dozilab_stack_label | to_json }},
+            "instance": {
+              "credentials": [
+          {% for g in deployment_groups %}
+                {
+                  "username": {{ g.username | to_json }},
+                  "password": {{ g.linux.password | to_json }}
+                }{% if not loop.last %},{% endif %}
+          {% endfor %}
+              ],
+              "admin_credentials": {
+                "username": {{ teacher.linux.username | to_json }},
+                "password": {{ teacher.linux.password | to_json }}
+              }
+            },
+            "applications": [
+              {
+                "name": "jupyterhub",
+                "version": "1.0.0"
+              }
+            ]
+          }
+      no_log: true
+
+    - name: Erzeugtes user_json validieren
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import re
+        import sys
+        from pathlib import Path
+
+        out_path = Path("/etc/dozilab/user.json")
+
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            sys.exit("generated user_json missing/empty")
+
+        obj = json.loads(out_path.read_text(encoding="utf-8"))
+
+        if not isinstance(obj, dict):
+            sys.exit("user_json must be an object")
+
+        instance = obj.get("instance") or {}
+        if not isinstance(instance, dict):
+            sys.exit("instance must be an object")
+
+        credentials = instance.get("credentials") or []
+        if not isinstance(credentials, list) or not credentials:
+            sys.exit("instance.credentials must be a non-empty list")
+
+        admin = instance.get("admin_credentials")
+        username_rx = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+        seen = set()
+
+        def validate_user(item, label):
+            if not isinstance(item, dict):
+                sys.exit(f"{label} must be an object")
+
+            username = item.get("username")
+            password = item.get("password")
+
+            if not isinstance(username, str) or not username_rx.match(username):
+                sys.exit(f"Invalid username in {label}: {username!r}")
+
+            if username in seen:
+                sys.exit(f"Duplicate username: {username!r}")
+
+            seen.add(username)
+
+            if not isinstance(password, str) or not password:
+                sys.exit(f"Empty password for {username!r}")
+
+        for idx, item in enumerate(credentials):
+            validate_user(item, f"instance.credentials[{idx}]")
+
+        validate_user(admin, "instance.admin_credentials")
+
+        print("generated user_json validated OK")
+        PY
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Benötigte Pakete installieren
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - python3-dev
+          - build-essential
+          - nodejs
+          - npm
+          - nginx
+          - git
+          - libpam0g-dev
+          - acl
+        state: present
+        update_cache: true
+
+    - name: Linux-User aus user_json erstellen und Kursbereiche vorbereiten
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import os
+        import subprocess
+        from pathlib import Path
+
+        user_json_path = Path("/etc/dozilab/user.json")
+        workdir = "{{ dozilab_workdir }}"
+
+        srv_root = Path("/srv/dozilab")
+        shared_root = Path("/srv/dozilab/groups")
+        teacher_group = "dozilab-teachers"
+
+        data = json.loads(user_json_path.read_text(encoding="utf-8"))
+        instance = data.get("instance") or {}
+        credentials = instance.get("credentials") or []
+        admin = instance.get("admin_credentials")
+
+        normal_users = []
+        teacher_users = []
+
+        def run(cmd, **kwargs):
+            subprocess.run(cmd, check=True, **kwargs)
+
+        def user_exists(username):
+            return subprocess.run(
+                ["id", username],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode == 0
+
+        def get_uid_gid(username):
+            uid = int(subprocess.check_output(["id", "-u", username], text=True).strip())
+            gid = int(subprocess.check_output(["id", "-g", username], text=True).strip())
+            return uid, gid
+
+        def ensure_symlink(link_path: Path, target_path: Path, owner: str):
+            if link_path.is_symlink():
+                current = Path(os.readlink(link_path))
+                if current != target_path:
+                    link_path.unlink()
+                    link_path.symlink_to(target_path)
+            elif link_path.exists():
+                if link_path.is_dir():
+                    backup = link_path.with_name(link_path.name + ".bak")
+                    if not backup.exists():
+                        link_path.rename(backup)
+                        link_path.symlink_to(target_path)
+                    else:
+                        raise RuntimeError(f"{link_path} exists and backup {backup} also exists")
+                else:
+                    link_path.unlink()
+                    link_path.symlink_to(target_path)
+            else:
+                link_path.symlink_to(target_path)
+
+            uid, gid = get_uid_gid(owner)
+            os.lchown(link_path, uid, gid)
+
+        def ensure_user(username, password, is_admin=False):
+            if not user_exists(username):
+                run(["useradd", "-m", "-s", "/bin/bash", username])
+
+            run(["chpasswd"], input=f"{username}:{password}\n", text=True)
+
+            if is_admin:
+                subprocess.run(["usermod", "-aG", f"sudo,{teacher_group}", username], check=False)
+
+            home = Path("/home") / username
+            user_workdir = home / workdir
+
+            run(["mkdir", "-p", str(user_workdir)])
+            run(["chown", "-R", f"{username}:{username}", str(user_workdir)])
+
+            # Homes bleiben privat. Geteilte Kursdaten liegen unter /srv/dozilab/groups.
+            run(["chmod", "700", str(home)])
+            run(["chmod", "700", str(user_workdir)])
+
+            profile = home / ".profile"
+            line = f'cd "$HOME/{workdir}"\n'
+
+            try:
+                content = profile.read_text(encoding="utf-8", errors="ignore")
+            except FileNotFoundError:
+                content = ""
+
+            if f'cd "$HOME/{workdir}"' not in content:
+                with profile.open("a", encoding="utf-8") as f:
+                    f.write(line)
+
+            run(["chown", f"{username}:{username}", str(profile)])
+
+        def ensure_shared_area_for_student(username):
+            home = Path("/home") / username
+            user_workdir = home / workdir
+            shared_dir = shared_root / username
+
+            run(["mkdir", "-p", str(shared_dir)])
+
+            # Student ist Owner, Teacher-Gruppe ist Group.
+            run(["chown", f"{username}:{teacher_group}", str(shared_dir)])
+
+            # 2 = setgid, damit neue Dateien/Ordner die Gruppe dozilab-teachers erben.
+            run(["chmod", "2770", str(shared_dir)])
+
+            # ACLs sorgen dafür, dass neu erzeugte Dateien teacher-zugänglich bleiben.
+            run(["setfacl", "-m", f"u:{username}:rwx", str(shared_dir)])
+            run(["setfacl", "-m", f"g:{teacher_group}:rwx", str(shared_dir)])
+            run(["setfacl", "-m", "o::---", str(shared_dir)])
+
+            run(["setfacl", "-d", "-m", f"u:{username}:rwx", str(shared_dir)])
+            run(["setfacl", "-d", "-m", f"g:{teacher_group}:rwx", str(shared_dir)])
+            run(["setfacl", "-d", "-m", "o::---", str(shared_dir)])
+
+            # Im JupyterLab der Gruppe erscheint der geteilte Bereich als group-share.
+            ensure_symlink(user_workdir / "group-share", shared_dir, username)
+
+        def ensure_teacher_links(teacher_username):
+            teacher_home = Path("/home") / teacher_username
+            teacher_workdir = teacher_home / workdir
+            groups_dir = teacher_workdir / "groups"
+
+            run(["mkdir", "-p", str(groups_dir)])
+            run(["chown", f"{teacher_username}:{teacher_username}", str(groups_dir)])
+            run(["chmod", "700", str(groups_dir)])
+
+            for student_username in normal_users:
+                shared_dir = shared_root / student_username
+                ensure_symlink(groups_dir / student_username, shared_dir, teacher_username)
+
+        run(["groupadd", "-f", teacher_group])
+
+        run(["mkdir", "-p", str(shared_root)])
+
+        # /srv/dozilab und /srv/dozilab/groups sind traversierbar, aber nicht listbar.
+        # So funktionieren Symlinks für Studenten, ohne fremde Gruppenordner lesbar zu machen.
+        run(["chown", "root:root", str(srv_root)])
+        run(["chmod", "0711", str(srv_root)])
+        run(["chown", "root:root", str(shared_root)])
+        run(["chmod", "0711", str(shared_root)])
+
+        for item in credentials:
+            username = item["username"]
+            password = item["password"]
+            ensure_user(username, password, is_admin=False)
+            normal_users.append(username)
+
+        if admin is not None:
+            username = admin["username"]
+            password = admin["password"]
+            ensure_user(username, password, is_admin=True)
+            teacher_users.append(username)
+
+        for username in normal_users:
+            ensure_shared_area_for_student(username)
+
+        for username in teacher_users:
+            ensure_teacher_links(username)
+
+        allowed = sorted(set(normal_users + teacher_users))
+        Path("/etc/jupyterhub/allowed_users").write_text(
+            "\n".join(allowed) + ("\n" if allowed else ""),
+            encoding="utf-8",
+        )
+
+        print("jupyter users:", ", ".join(allowed) if allowed else "(none)")
+        print("shared groups:", ", ".join(normal_users) if normal_users else "(none)")
+        PY
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: JupyterHub Python venv erstellen
+      command: python3 -m venv /opt/jupyterhub
+      args:
+        creates: /opt/jupyterhub/bin/python
+
+    - name: pip, wheel und setuptools aktualisieren
+      command: /opt/jupyterhub/bin/python -m pip install --upgrade pip wheel setuptools
+
+    - name: JupyterHub und Data-Science-Pakete installieren
+      command: >
+        /opt/jupyterhub/bin/pip install
+        jupyterhub
+        jupyterlab
+        notebook
+        ipykernel
+        numpy
+        pandas
+        matplotlib
+        scipy
+        scikit-learn
+        seaborn
+        sqlalchemy
+        requests
+
+    - name: configurable-http-proxy installieren
+      shell: |
+        set -euo pipefail
+        if ! command -v configurable-http-proxy >/dev/null 2>&1; then
+          apt-get install -y node-configurable-http-proxy || npm install -g configurable-http-proxy@4
+        fi
+        command -v configurable-http-proxy >/dev/null 2>&1
+      args:
+        executable: /bin/bash
+
+    - name: JupyterHub Konfiguration schreiben
+      copy:
+        dest: /etc/jupyterhub/jupyterhub_config.py
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          from pathlib import Path
+
+          c.JupyterHub.bind_url = "http://127.0.0.1:8000/"
+          c.JupyterHub.cookie_secret_file = "/etc/jupyterhub/jupyterhub_cookie_secret"
+          c.JupyterHub.db_url = "sqlite:////var/lib/jupyterhub/jupyterhub.sqlite"
+          c.JupyterHub.log_level = "INFO"
+
+          c.Authenticator.allowed_users = {
+              line.strip()
+              for line in Path("/etc/jupyterhub/allowed_users").read_text().splitlines()
+              if line.strip()
+          }
+
+          c.Spawner.default_url = "/lab"
+          c.Spawner.notebook_dir = "~/{{ dozilab_workdir }}"
+          c.Spawner.cmd = ["/opt/jupyterhub/bin/jupyterhub-singleuser"]
+          c.Spawner.environment = {
+              "PATH": "/opt/jupyterhub/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          }
+
+    - name: systemd Service für JupyterHub schreiben
+      copy:
+        dest: /etc/systemd/system/jupyterhub.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=JupyterHub
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=/etc/jupyterhub
+          ExecStart=/opt/jupyterhub/bin/jupyterhub -f /etc/jupyterhub/jupyterhub_config.py
+          Restart=on-failure
+          RestartSec=5
+          Environment=PATH=/opt/jupyterhub/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Nginx Default Site entfernen
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Nginx Site für Jupyter schreiben
+      copy:
+        dest: /etc/nginx/sites-available/dozilab-jupyter
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              server_name _;
+
+              client_max_body_size 100m;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_read_timeout 86400;
+              }
+          }
+
+    - name: Nginx Site aktivieren
+      file:
+        src: /etc/nginx/sites-available/dozilab-jupyter
+        dest: /etc/nginx/sites-enabled/dozilab-jupyter
+        state: link
+
+    - name: Beispiel-Notebooks erstellen
+      shell: |
+        set -euo pipefail
+
+        cat >/opt/dozilab/notebooks/01_python_basics.ipynb <<'EOF'
+        {
+         "cells": [
+          {
+           "cell_type": "markdown",
+           "metadata": {},
+           "source": ["# Python Basics\n", "Erste Schritte im DoziLab Jupyter Data Science Lab."]
+          },
+          {
+           "cell_type": "code",
+           "execution_count": null,
+           "metadata": {},
+           "outputs": [],
+           "source": ["values = [1, 2, 3, 4]\n", "sum(values) / len(values)"]
+          }
+         ],
+         "metadata": {
+          "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+          "language_info": {"name": "python", "pygments_lexer": "ipython3"}
+         },
+         "nbformat": 4,
+         "nbformat_minor": 5
+        }
+        EOF
+
+        cat >/opt/dozilab/notebooks/02_pandas_intro.ipynb <<'EOF'
+        {
+         "cells": [
+          {
+           "cell_type": "markdown",
+           "metadata": {},
+           "source": ["# Pandas Intro\n", "Ein kleines DataFrame-Beispiel."]
+          },
+          {
+           "cell_type": "code",
+           "execution_count": null,
+           "metadata": {},
+           "outputs": [],
+           "source": ["import pandas as pd\n", "df = pd.DataFrame({'name': ['A', 'B', 'C'], 'score': [12, 18, 15]})\n", "df"]
+          }
+         ],
+         "metadata": {
+          "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+          "language_info": {"name": "python", "pygments_lexer": "ipython3"}
+         },
+         "nbformat": 4,
+         "nbformat_minor": 5
+        }
+        EOF
+
+        python3 - <<'PY'
+        import os
+        import pwd
+        import shutil
+        from pathlib import Path
+
+        workdir = "{{ dozilab_workdir }}"
+        allowed_path = Path("/etc/jupyterhub/allowed_users")
+        template_dir = Path("/opt/dozilab/notebooks")
+
+        users = [line.strip() for line in allowed_path.read_text().splitlines() if line.strip()]
+
+        for username in users:
+            user_info = pwd.getpwnam(username)
+            target = Path(user_info.pw_dir) / workdir / "notebooks"
+            target.mkdir(parents=True, exist_ok=True)
+
+            for source in template_dir.glob("*.ipynb"):
+                destination = target / source.name
+                if not destination.exists():
+                    shutil.copy2(source, destination)
+
+            for path in target.rglob("*"):
+                os.chown(path, user_info.pw_uid, user_info.pw_gid)
+            os.chown(target, user_info.pw_uid, user_info.pw_gid)
+        PY
+      args:
+        executable: /bin/bash
+      when: dozilab_install_examples | bool
+
+    - name: SSH Passwortlogin für Kursnutzer deaktivieren
+      copy:
+        dest: /etc/ssh/sshd_config.d/99-dozilab-jupyter.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+          UsePAM yes
+          PermitRootLogin no
+          AllowUsers ubuntu
+
+    - name: Services starten
+      systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: restarted
+        daemon_reload: true
+      loop:
+        - jupyterhub
+        - nginx
+
+    - name: SSH Service neu starten
+      service:
+        name: ssh
+        state: restarted
+
+    - name: JupyterHub prüfen
+      command: systemctl is-active --quiet jupyterhub
+      changed_when: false
+
+    - name: Nginx prüfen
+      command: systemctl is-active --quiet nginx
+      changed_when: false
+
+    - name: Auf JupyterHub HTTP warten
+      uri:
+        url: http://127.0.0.1:8000/hub/health
+        status_code: [200]
+        return_content: false
+      register: jupyterhub_health
+      retries: 30
+      delay: 3
+      until: jupyterhub_health.status == 200
+
+    - name: Nginx Reverse Proxy lokal prüfen
+      uri:
+        url: http://127.0.0.1/
+        status_code: [200, 302, 403, 405]
+        return_content: false
+      register: nginx_jupyter_check
+      retries: 20
+      delay: 3
+      until: nginx_jupyter_check.status in [200, 302, 403, 405]
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: "DOZILAB_READY stack={{ dozilab_stack_label }} time={{ ansible_facts.date_time.iso8601 }}\n"
+
+    - name: Fail Marker entfernen falls vorhanden
+      file:
+        path: "{{ dozilab_mark_dir }}/failed"
+        state: absent
+
+    - name: Abschluss anzeigen
+      debug:
+        msg:
+          - "DoziLab Jupyter Setup OK"
+          - "Stack: {{ dozilab_stack_label }}"
+          - "Workdir: {{ dozilab_workdir }}"
+          - "Examples: {{ dozilab_install_examples }}"
