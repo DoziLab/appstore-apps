@@ -35,14 +35,15 @@ Typische Uebungen:
 
 ## Login
 
-OpenProject initialisiert den Standard-Admin beim ersten Start. Bei einer
-frischen OpenProject-Installation ist der initiale Login ueblicherweise:
+DoziLab erzeugt beim Deployment OpenProject-Logins:
 
-```text
-admin / admin
-```
+- `admin` fuer den Dozenten/Administrator
+- ein Login pro Kursgruppe
 
-Das Passwort sollte nach dem ersten Login direkt geaendert werden.
+Die OpenProject-Logins verwenden dieselben generierten DoziLab-Credentials, die
+in den Deployment-Credentials angezeigt werden. Der OpenProject-Default
+`admin / admin` wird nach dem ersten Start durch das generierte Admin-Passwort
+ersetzt.
 
 ## Testen
 

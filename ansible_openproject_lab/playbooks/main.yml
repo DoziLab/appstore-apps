@@ -21,6 +21,47 @@
           - stack_label | default('project') is match('^[a-z0-9][a-z0-9-]{0,30}$')
         fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfuellen."
 
+    - name: OpenProject Backend-Credentials validieren
+      assert:
+        that:
+          - teacher.linux is defined
+          - teacher.linux.username is defined
+          - teacher.linux.username is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - teacher.linux.password is defined
+          - teacher.linux.password | length > 0
+          - deployment_groups is defined
+          - deployment_groups | length > 0
+        fail_msg: "Backend-Credentials fehlen. Erwartet werden teacher.linux und deployment_groups[].linux."
+      no_log: true
+
+    - name: OpenProject Gruppen-Credentials validieren
+      assert:
+        that:
+          - item.linux is defined
+          - item.linux.username is defined
+          - item.linux.username is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - item.email is defined
+          - "'@' in item.email"
+          - item.linux.password is defined
+          - item.linux.password | length > 0
+        fail_msg: "Ungueltige OpenProject Gruppen-Credentials."
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Gruppen-Linux-Accounts erstellen
+      user:
+        name: "{{ item.linux.username }}"
+        shell: /bin/bash
+        create_home: true
+        state: present
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Gruppen-Linux-Passwoerter setzen
+      shell: "echo '{{ item.linux.username }}:{{ item.linux.password }}' | chpasswd"
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
     - name: DoziLab und OpenProject Verzeichnisse erstellen
       file:
         path: "{{ item.path }}"
@@ -198,6 +239,100 @@
       args:
         executable: /bin/bash
       changed_when: false
+
+    - name: OpenProject User-Setup JSON schreiben
+      copy:
+        dest: /etc/openproject/dozilab-users.json
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {
+            "admin": {
+              "username": {{ teacher.linux.username | to_json }},
+              "email": {{ teacher.email | default('admin@dozilab.local') | to_json }},
+              "password": {{ teacher.linux.password | to_json }},
+              "first_name": {{ teacher.first_name | default('DoziLab') | to_json }},
+              "last_name": {{ teacher.last_name | default('Admin') | to_json }}
+            },
+            "groups": [
+          {% for group in deployment_groups | default([]) %}
+              {
+                "username": {{ group.linux.username | to_json }},
+                "email": {{ group.email | to_json }},
+                "password": {{ group.linux.password | to_json }},
+                "group_name": {{ group.group_name | default(group.username) | to_json }}
+              }{% if not loop.last %},{% endif %}
+          {% endfor %}
+            ]
+          }
+      no_log: true
+
+    - name: OpenProject Benutzer im Container anlegen
+      shell: |
+        set -euo pipefail
+
+        docker cp /etc/openproject/dozilab-users.json {{ openproject_container_name }}:/tmp/dozilab-users.json
+
+        docker exec {{ openproject_container_name }} bash -lc 'cat >/tmp/dozilab-create-users.rb <<'"'"'RUBY'"'"'
+        require "json"
+
+        data = JSON.parse(File.read("/tmp/dozilab-users.json"))
+
+        def activate(user)
+          if defined?(Principal::STATUSES) && Principal::STATUSES.respond_to?(:[])
+            user.status = Principal::STATUSES[:active]
+          elsif user.respond_to?(:activate)
+            user.activate
+          else
+            user.status = 1 if user.respond_to?(:status=)
+          end
+        rescue
+          user.status = 1 if user.respond_to?(:status=)
+        end
+
+        def set_password(user, password)
+          if user.respond_to?(:password=)
+            user.password = password
+            user.password_confirmation = password if user.respond_to?(:password_confirmation=)
+          else
+            raise "OpenProject user model does not expose password="
+          end
+        end
+
+        def ensure_user(entry, admin:)
+          login = entry.fetch("username").to_s
+          email = entry.fetch("email").to_s
+          password = entry.fetch("password").to_s
+          raise "empty password for #{login}" if password.empty?
+
+          user = User.find_by(login: login) || User.find_by(mail: email) || User.new
+          user.login = login if user.respond_to?(:login=)
+          user.mail = email if user.respond_to?(:mail=)
+          user.firstname = (entry["first_name"] || entry["group_name"] || login).to_s[0, 30] if user.respond_to?(:firstname=)
+          user.lastname = (entry["last_name"] || "DoziLab").to_s[0, 30] if user.respond_to?(:lastname=)
+          user.admin = admin if user.respond_to?(:admin=)
+          user.force_password_change = false if user.respond_to?(:force_password_change=)
+          activate(user)
+          set_password(user, password)
+          user.save!
+          puts "#{admin ? "admin" : "user"}:#{login}:#{email}"
+        end
+
+        ensure_user(data.fetch("admin"), admin: true)
+        data.fetch("groups").each do |entry|
+          entry["first_name"] = entry["group_name"] || entry.fetch("username")
+          entry["last_name"] = "Gruppe"
+          ensure_user(entry, admin: false)
+        end
+        RUBY
+        cd /app 2>/dev/null || cd /usr/src/app 2>/dev/null || true
+        RAILS_ENV=production bundle exec rails runner /tmp/dozilab-create-users.rb'
+      args:
+        executable: /bin/bash
+      register: openproject_user_setup
+      changed_when: true
+      no_log: true
 
     - name: Ready Marker schreiben
       copy:

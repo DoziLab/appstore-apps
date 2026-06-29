@@ -124,3 +124,14 @@ outputs:
   - name: root_volume_id
     label: Root Volume ID
     from_heat_output: root_volume_id
+
+credentials:
+  per_group:
+    - linux:
+        username: "{{ username }}"
+        password: generate
+
+  teacher:
+    - linux:
+        username: admin
+        password: generate
