@@ -8,6 +8,7 @@
     dozilab_mark_dir: /var/lib/dozilab
     dozilab_site_root: /var/www/html
     dozilab_app_name: ansible-static-website-lab
+    dozilab_web_group: webedit
 
   tasks:
     - name: DoziLab Verzeichnisse erstellen
@@ -19,21 +20,79 @@
         mode: "{{ item.mode }}"
       loop:
         - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
-        - { path: "{{ dozilab_site_root }}", mode: "0755" }
+        - { path: "{{ dozilab_site_root }}", mode: "2775" }
 
     - name: Nginx installieren
       apt:
-        name: nginx
+        name:
+          - nginx
+          - acl
         state: present
         update_cache: true
         cache_valid_time: 3600
 
+    - name: Web-Editor-Gruppe erstellen
+      group:
+        name: "{{ dozilab_web_group }}"
+        state: present
+
+    - name: Lehrer zur Web-Editor-Gruppe hinzufuegen
+      user:
+        name: "{{ teacher.linux.username }}"
+        groups: "{{ dozilab_web_group }}"
+        append: true
+      when: teacher.linux.username is defined
+
+    - name: Gruppen-Linux-Accounts validieren
+      assert:
+        that:
+          - deployment_groups is defined
+          - item.linux is defined
+          - item.linux.username is defined
+          - item.linux.username is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - item.linux.password is defined
+          - item.linux.password | length > 0
+        fail_msg: "Backend-Credentials fehlen. Erwartet werden deployment_groups[].linux fuer Static Website Lab."
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Gruppen-Linux-Accounts erstellen und Webroot-Zugriff erlauben
+      user:
+        name: "{{ item.linux.username }}"
+        shell: /bin/bash
+        create_home: true
+        groups: "{{ dozilab_web_group }}"
+        append: true
+        state: present
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Gruppen-Linux-Passwoerter setzen
+      shell: "echo '{{ item.linux.username }}:{{ item.linux.password }}' | chpasswd"
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: SSH fuer Gruppen-Accounts erlauben
+      copy:
+        dest: /etc/ssh/sshd_config.d/98-dozilab-allowusers.conf
+        mode: "0644"
+        content: "AllowUsers ubuntu {{ teacher.linux.username }}{% for group in deployment_groups | default([]) %} {{ group.linux.username }}{% endfor %}\n"
+      notify: SSH neu starten
+
+    - name: Webroot fuer Bearbeitung ohne sudo vorbereiten
+      file:
+        path: "{{ dozilab_site_root }}"
+        state: directory
+        owner: root
+        group: "{{ dozilab_web_group }}"
+        mode: "2775"
+
     - name: Standard-Webseite schreiben
       copy:
         dest: "{{ dozilab_site_root }}/index.html"
-        owner: www-data
-        group: www-data
-        mode: "0644"
+        owner: root
+        group: "{{ dozilab_web_group }}"
+        mode: "0664"
         content: |
           <!doctype html>
           <html lang="de">
@@ -102,8 +161,8 @@
               </p>
               <ul>
                 <li>per SSH auf die VM verbinden</li>
-                <li><code>index.html</code> bearbeiten oder ersetzen</li>
-                <li>Seite im Browser neu laden und Aenderungen pruefen</li>
+                <li><code>nano /var/www/html/index.html</code> ausfuehren</li>
+                <li>speichern und die Seite im Browser neu laden</li>
               </ul>
               <div class="info">
                 Stack: {{ stack_label | default('web') }}<br>
@@ -112,6 +171,13 @@
             </main>
           </body>
           </html>
+
+    - name: Webroot ACLs fuer neue Dateien setzen
+      command: "{{ item }}"
+      loop:
+        - "setfacl -R -m g:{{ dozilab_web_group }}:rwX {{ dozilab_site_root }}"
+        - "setfacl -R -m d:g:{{ dozilab_web_group }}:rwX {{ dozilab_site_root }}"
+      changed_when: true
 
     - name: Nginx Default Site konfigurieren
       copy:
@@ -152,14 +218,37 @@
       when: nginx_default_site.changed
 
     - name: Lokalen HTTP-Endpunkt pruefen
-      uri:
-        url: http://127.0.0.1/
-        status_code: 200
-        return_content: false
-      register: website_check
-      retries: 10
-      delay: 3
-      until: website_check.status == 200
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import sys
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = "http://127.0.0.1/"
+        last_error = None
+
+        for attempt in range(10):
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    if response.status == 200:
+                        print(f"Static website HTTP ready: {response.status}")
+                        sys.exit(0)
+            except urllib.error.HTTPError as err:
+                last_error = f"HTTP {err.code}"
+            except Exception as err:
+                last_error = str(err)
+
+            if attempt < 9:
+                time.sleep(3)
+
+        sys.exit(f"Static website HTTP did not become ready: {last_error}")
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     - name: Ready Marker schreiben
       copy:
@@ -168,4 +257,10 @@
         group: root
         mode: "0644"
         content: |
-          DOZILAB_READY app={{ dozilab_app_name }} stack={{ stack_label | default('web') }}
+          DOZILAB_READY app={{ dozilab_app_name }} stack={{ stack_label | default('web') }} webroot={{ dozilab_site_root }}
+
+  handlers:
+    - name: SSH neu starten
+      service:
+        name: ssh
+        state: restarted

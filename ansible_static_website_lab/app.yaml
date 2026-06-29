@@ -1,7 +1,7 @@
 app:
   name: ansible-static-website-lab
   label: Ansible Static Website Lab
-  version: 1.0.0
+  version: 2.0.0
   description: >
     Ubuntu VM mit Nginx und einer einfachen Beispiel-Webseite.
     Infrastruktur wird per Heat erstellt, die Webserver-Konfiguration laeuft per Ansible.
@@ -111,3 +111,12 @@ outputs:
   - name: root_volume_id
     label: Root Volume ID
     from_heat_output: root_volume_id
+
+credentials:
+  per_group:
+    - linux:
+        username: "{{ username }}"
+        password: generate
+
+  teacher:
+    # teacher.linux automatisch vorhanden — kein Eintrag nötig
