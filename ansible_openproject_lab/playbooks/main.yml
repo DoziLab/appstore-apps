@@ -1,0 +1,209 @@
+---
+- name: DoziLab OpenProject Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_mark_dir: /var/lib/dozilab
+    openproject_data_dir: /var/lib/openproject
+    openproject_secret_file: /etc/openproject/secret_key_base
+    openproject_env_file: /etc/openproject/openproject.env
+    openproject_image: "openproject/openproject:{{ openproject_image_tag | default('17') }}"
+    openproject_host_name: "{{ openproject_host_name | default(inventory_hostname) }}"
+    openproject_container_name: openproject
+    openproject_unit_name: openproject.service
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - stack_label | default('project') is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfuellen."
+
+    - name: DoziLab und OpenProject Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
+        - { path: "/etc/openproject", mode: "0700" }
+        - { path: "{{ openproject_data_dir }}", mode: "0755" }
+        - { path: "{{ openproject_data_dir }}/pgdata", mode: "0755" }
+        - { path: "{{ openproject_data_dir }}/assets", mode: "0755" }
+
+    - name: Docker installieren
+      apt:
+        name:
+          - docker.io
+          - openssl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Docker aktivieren und starten
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: OpenProject Secret-Datei pruefen
+      stat:
+        path: "{{ openproject_secret_file }}"
+      register: openproject_secret_stat
+
+    - name: Vorhandenes OpenProject Secret lesen
+      slurp:
+        src: "{{ openproject_secret_file }}"
+      register: existing_openproject_secret_raw
+      when: openproject_secret_stat.stat.exists
+      no_log: true
+
+    - name: Vorhandenes OpenProject Secret auswerten
+      set_fact:
+        existing_openproject_secret: "{{ existing_openproject_secret_raw.content | default('') | b64decode | trim }}"
+      no_log: true
+
+    - name: OpenProject Secret erzeugen
+      command: "openssl rand -hex 64"
+      register: generated_openproject_secret
+      changed_when: generated_openproject_secret.stdout is defined
+      when: (existing_openproject_secret | default('')) is not match('^[0-9a-f]{128}$')
+      no_log: true
+
+    - name: OpenProject Secret speichern
+      copy:
+        dest: "{{ openproject_secret_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: "{{ generated_openproject_secret.stdout | default(existing_openproject_secret | default('')) }}\n"
+      no_log: true
+
+    - name: OpenProject Secret lesen
+      slurp:
+        src: "{{ openproject_secret_file }}"
+      register: openproject_secret_raw
+      no_log: true
+
+    - name: OpenProject Docker Image laden
+      command: "docker pull {{ openproject_image }}"
+      register: docker_pull_result
+      changed_when: "'Downloaded newer image' in docker_pull_result.stdout or 'Pull complete' in docker_pull_result.stdout"
+
+    - name: OpenProject Environment schreiben
+      copy:
+        dest: "{{ openproject_env_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          SECRET_KEY_BASE={{ openproject_secret_raw.content | b64decode | trim }}
+          OPENPROJECT_HOST__NAME={{ openproject_host_name }}
+          OPENPROJECT_HTTPS=false
+      no_log: true
+      register: openproject_env
+
+    - name: OpenProject systemd Unit schreiben
+      copy:
+        dest: "/etc/systemd/system/{{ openproject_unit_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=DoziLab OpenProject Container
+          Requires=docker.service
+          After=docker.service
+
+          [Service]
+          Restart=always
+          RestartSec=10
+          TimeoutStartSec=0
+          ExecStartPre=-/usr/bin/docker rm -f {{ openproject_container_name }}
+          ExecStart=/usr/bin/docker run --name {{ openproject_container_name }} \
+            --publish 80:80 \
+            --env-file {{ openproject_env_file }} \
+            --volume {{ openproject_data_dir }}/pgdata:/var/openproject/pgdata \
+            --volume {{ openproject_data_dir }}/assets:/var/openproject/assets \
+            {{ openproject_image }}
+          ExecStop=/usr/bin/docker stop {{ openproject_container_name }}
+          ExecStopPost=-/usr/bin/docker rm -f {{ openproject_container_name }}
+
+          [Install]
+          WantedBy=multi-user.target
+      register: openproject_unit
+
+    - name: systemd neu laden
+      systemd:
+        daemon_reload: true
+      when: openproject_unit.changed
+
+    - name: OpenProject starten
+      service:
+        name: "{{ openproject_unit_name }}"
+        state: restarted
+        enabled: true
+      when: openproject_unit.changed or openproject_env.changed or docker_pull_result.changed
+
+    - name: OpenProject sicherstellen
+      service:
+        name: "{{ openproject_unit_name }}"
+        state: started
+        enabled: true
+
+    - name: OpenProject Service pruefen
+      command: systemctl is-active --quiet "{{ openproject_unit_name }}"
+      changed_when: false
+
+    - name: Auf OpenProject HTTP warten
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import sys
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = "http://127.0.0.1/"
+        host_header = "{{ openproject_host_name }}"
+        accepted_status = {200, 301, 302, 303}
+        last_error = None
+
+        for attempt in range(90):
+            try:
+                request = urllib.request.Request(url, headers={"Host": host_header}, method="GET")
+                opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+                with opener.open(request, timeout=3) as response:
+                    if response.status in accepted_status:
+                        print(f"OpenProject HTTP ready: {response.status}")
+                        sys.exit(0)
+            except urllib.error.HTTPError as err:
+                if err.code in accepted_status:
+                    print(f"OpenProject HTTP ready: {err.code}")
+                    sys.exit(0)
+                last_error = f"HTTP {err.code}"
+            except Exception as err:
+                last_error = str(err)
+
+            if attempt < 89:
+                time.sleep(10)
+
+        sys.exit(f"OpenProject HTTP did not become ready: {last_error}")
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DOZILAB_READY app=ansible-openproject-lab stack={{ stack_label | default('project') }} url=http://{{ openproject_host_name }}/

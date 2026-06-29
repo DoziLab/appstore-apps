@@ -1,0 +1,126 @@
+app:
+  name: ansible-openproject-lab
+  label: Ansible OpenProject Lab
+  version: 1.0.0
+  description: >
+    Ubuntu VM mit OpenProject fuer Projektmanagement, Aufgabenplanung,
+    Gantt-Ansichten und Teamarbeit. Infrastruktur wird per Heat erstellt,
+    Installation und Betrieb laufen per Ansible.
+  owner_team: dozilab-app-team
+
+artifacts:
+  heat_template: heat/main.yaml
+  ansible_playbook: playbooks/main.yml
+
+parameters:
+  - name: stack_label
+    label: Stack-Label
+    step: template
+    type: string
+    default: project
+    required: true
+    description: "Kurzes Label fuer VM-Namen und Metadaten, z.B. projekt-2026-01."
+
+  - name: image
+    label: Betriebssystem-Image
+    step: konfiguration
+    type: string
+    default: "Ubuntu 22.04 2025-01"
+    required: true
+    enum:
+      - "Ubuntu 22.04 2025-01"
+      - "Ubuntu 24.04 2025-01"
+      - "Ubuntu 24.04 2026-01"
+
+  - name: flavor
+    label: VM-Groesse (Flavor)
+    step: konfiguration
+    type: string
+    default: "gp1.medium"
+    required: true
+    enum:
+      - "gp1.medium"
+      - "gp1.large"
+      - "mb1.medium"
+      - "mb1.large"
+    description: "OpenProject ist ressourcenintensiver als einfache Web-Apps. gp1.medium ist der empfohlene Einstieg."
+
+  - name: volume_size
+    label: Speicher (GB)
+    step: konfiguration
+    type: number
+    default: 16
+    required: true
+    enum:
+      - 16
+      - 32
+      - 64
+      - 128
+    description: "Groesse der Root-Disk als Cinder-Volume."
+
+  - name: openproject_image_tag
+    label: OpenProject Version
+    step: konfiguration
+    type: string
+    default: "17"
+    required: true
+    enum:
+      - "17"
+    description: "Docker-Image-Tag fuer openproject/openproject."
+
+  - name: ssh_cidr
+    label: SSH-Zugriff (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "Nur dieses Netz darf per SSH zugreifen. Standard: DHBW/VPN."
+
+  - name: web_cidr
+    label: OpenProject-Zugriff (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "Nur dieses Netz darf OpenProject ueber HTTP Port 80 erreichen."
+
+  - name: network
+    label: Internes Netzwerk
+    step: netzwerk
+    type: string
+    default: "NAT"
+    hidden: true
+    description: "Internes OpenStack-Netzwerk."
+
+  - name: external_network
+    label: Externes Netzwerk
+    step: netzwerk
+    type: string
+    default: "DHBW"
+    hidden: true
+    description: "Floating-IP-Netzwerk."
+
+outputs:
+  - name: openproject_url
+    label: OpenProject URL
+    from_heat_output: openproject_url
+
+  - name: floating_ip
+    label: Floating IP
+    from_heat_output: floating_ip
+
+  - name: private_ip
+    label: Private IP
+    from_heat_output: private_ip
+
+  - name: server_id
+    label: Server ID
+    from_heat_output: server_id
+
+  - name: ssh_hint
+    label: SSH Hinweis
+    from_heat_output: ssh_hint
+
+  - name: root_volume_id
+    label: Root Volume ID
+    from_heat_output: root_volume_id
