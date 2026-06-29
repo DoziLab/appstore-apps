@@ -1,0 +1,176 @@
+---
+- name: DoziLab Minimal Template Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_app_name: ansible-minimal-template-lab
+    dozilab_mark_dir: /var/lib/dozilab
+    dozilab_state_dir: /etc/dozilab
+    dozilab_group_root: /srv/dozilab/groups
+    dozilab_create_group_users: "{{ create_group_users | default(true) }}"
+    dozilab_welcome_message: "{{ welcome_message | default('Willkommen im DoziLab Template Lab.') }}"
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - stack_label | default('demo') is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfuellen."
+
+    - name: Backend-Gruppen validieren
+      assert:
+        that:
+          - deployment_groups is defined
+          - deployment_groups | length > 0
+        fail_msg: "deployment_groups fehlt. Die App erwartet mindestens eine Kursgruppe."
+
+    - name: Gruppen-Credentials validieren
+      assert:
+        that:
+          - item.username is defined
+          - item.username is match('^[a-z_][a-z0-9_]{0,31}$')
+          - item.linux is defined
+          - item.linux.password is defined
+          - item.linux.password | length >= 6
+        fail_msg: "Ungueltige Gruppen-Credentials. Erwartet deployment_groups[].linux.password."
+      loop: "{{ deployment_groups }}"
+      no_log: true
+
+    - name: DoziLab Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
+        - { path: "{{ dozilab_state_dir }}", mode: "0700" }
+        - { path: "{{ dozilab_group_root }}", mode: "0755" }
+
+    - name: Deployment-Metadaten aus Backend-Variablen schreiben
+      copy:
+        dest: "{{ dozilab_state_dir }}/template-lab.json"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {
+            "app": {{ dozilab_app_name | to_json }},
+            "stack_label": {{ stack_label | default('demo') | to_json }},
+            "teacher_available": {{ (teacher is defined) | to_json }},
+            "groups": [
+          {% for group in deployment_groups %}
+              {
+                "group_name": {{ group.group_name | default(group.username) | to_json }},
+                "username": {{ group.username | to_json }},
+                "has_linux_password": {{ (group.linux.password is defined) | to_json }},
+                "has_ssh_key": {{ (group.linux.ssh_key is defined and group.linux.ssh_key.public_key is defined) | to_json }}
+              }{% if not loop.last %},{% endif %}
+          {% endfor %}
+            ]
+          }
+      no_log: true
+
+    - name: Gruppen-Linux-Accounts erstellen
+      user:
+        name: "{{ item.username }}"
+        shell: /bin/bash
+        create_home: true
+        state: present
+      loop: "{{ deployment_groups }}"
+      when: dozilab_create_group_users | bool
+      no_log: true
+
+    - name: Gruppen-Passwoerter setzen
+      user:
+        name: "{{ item.username }}"
+        password: "{{ item.linux.password | password_hash('sha512') }}"
+        update_password: always
+      loop: "{{ deployment_groups }}"
+      when: dozilab_create_group_users | bool
+      no_log: true
+
+    - name: Gruppen-SSH-Public-Key installieren
+      ansible.posix.authorized_key:
+        user: "{{ item.username }}"
+        key: "{{ item.linux.ssh_key.public_key }}"
+        state: present
+      loop: "{{ deployment_groups }}"
+      when:
+        - dozilab_create_group_users | bool
+        - item.linux.ssh_key is defined
+        - item.linux.ssh_key.public_key is defined
+      no_log: true
+
+    - name: Gruppen-Arbeitsverzeichnisse erstellen
+      file:
+        path: "{{ dozilab_group_root }}/{{ item.username }}"
+        state: directory
+        owner: "{{ item.username if (dozilab_create_group_users | bool) else 'root' }}"
+        group: "{{ item.username if (dozilab_create_group_users | bool) else 'root' }}"
+        mode: "0750"
+      loop: "{{ deployment_groups }}"
+      no_log: true
+
+    - name: Welcome-Datei in Gruppen-Home kopieren
+      copy:
+        src: /opt/dozilab/files/welcome.txt
+        dest: "/home/{{ item.username }}/welcome.txt"
+        owner: "{{ item.username }}"
+        group: "{{ item.username }}"
+        mode: "0640"
+        remote_src: true
+      loop: "{{ deployment_groups }}"
+      when: dozilab_create_group_users | bool
+      no_log: true
+
+    - name: Stack-Label in Welcome-Datei ersetzen
+      replace:
+        path: "/home/{{ item.username }}/welcome.txt"
+        regexp: "__STACK_LABEL__"
+        replace: "{{ stack_label | default('demo') }}"
+      loop: "{{ deployment_groups }}"
+      when: dozilab_create_group_users | bool
+      no_log: true
+
+    - name: Gruppennamen in Welcome-Datei ersetzen
+      replace:
+        path: "/home/{{ item.username }}/welcome.txt"
+        regexp: "__GROUP_NAME__"
+        replace: "{{ item.group_name | default(item.username) }}"
+      loop: "{{ deployment_groups }}"
+      when: dozilab_create_group_users | bool
+      no_log: true
+
+    - name: Begruessungstext in Welcome-Datei ersetzen
+      replace:
+        path: "/home/{{ item.username }}/welcome.txt"
+        regexp: "__WELCOME_MESSAGE__"
+        replace: "{{ dozilab_welcome_message }}"
+      loop: "{{ deployment_groups }}"
+      when: dozilab_create_group_users | bool
+      no_log: true
+
+    - name: Check-Script ausfuehrbar machen
+      file:
+        path: /opt/dozilab/scripts/check_template_setup.sh
+        mode: "0755"
+
+    - name: Gruppen-Setup pruefen
+      command: /opt/dozilab/scripts/check_template_setup.sh {{ item.username }}
+      loop: "{{ deployment_groups }}"
+      when: dozilab_create_group_users | bool
+      changed_when: false
+      no_log: true
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DOZILAB_READY app={{ dozilab_app_name }} stack={{ stack_label | default('demo') }}

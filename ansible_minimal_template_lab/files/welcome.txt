@@ -1,0 +1,10 @@
+DoziLab Template Lab
+====================
+
+Stack: __STACK_LABEL__
+Gruppe: __GROUP_NAME__
+
+__WELCOME_MESSAGE__
+
+Diese Datei kommt aus appstore-apps/ansible_minimal_template_lab/files/welcome.txt
+und wurde vom Ansible-Playbook in dein Home-Verzeichnis kopiert.
