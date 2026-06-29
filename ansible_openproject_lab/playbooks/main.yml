@@ -10,7 +10,7 @@
     openproject_secret_file: /etc/openproject/secret_key_base
     openproject_env_file: /etc/openproject/openproject.env
     openproject_image: "openproject/openproject:{{ openproject_image_tag | default('17') }}"
-    openproject_host_name: "{{ openproject_host_name | default(inventory_hostname) }}"
+    openproject_public_host: "{{ ansible_host | default(inventory_hostname) }}"
     openproject_container_name: openproject
     openproject_unit_name: openproject.service
 
@@ -102,7 +102,7 @@
         mode: "0600"
         content: |
           SECRET_KEY_BASE={{ openproject_secret_raw.content | b64decode | trim }}
-          OPENPROJECT_HOST__NAME={{ openproject_host_name }}
+          OPENPROJECT_HOST__NAME={{ openproject_public_host }}
           OPENPROJECT_HTTPS=false
       no_log: true
       register: openproject_env
@@ -170,7 +170,7 @@
         import urllib.request
 
         url = "http://127.0.0.1/"
-        host_header = "{{ openproject_host_name }}"
+        host_header = "{{ openproject_public_host }}"
         accepted_status = {200, 301, 302, 303}
         last_error = None
 
@@ -206,4 +206,4 @@
         group: root
         mode: "0644"
         content: |
-          DOZILAB_READY app=ansible-openproject-lab stack={{ stack_label | default('project') }} url=http://{{ openproject_host_name }}/
+          DOZILAB_READY app=ansible-openproject-lab stack={{ stack_label | default('project') }} url=http://{{ openproject_public_host }}/

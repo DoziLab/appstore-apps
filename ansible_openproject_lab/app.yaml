@@ -1,7 +1,7 @@
 app:
   name: ansible-openproject-lab
   label: Ansible OpenProject Lab
-  version: 1.0.0
+  version: 1.1.0
   description: >
     Ubuntu VM mit OpenProject fuer Projektmanagement, Aufgabenplanung,
     Gantt-Ansichten und Teamarbeit. Infrastruktur wird per Heat erstellt,
