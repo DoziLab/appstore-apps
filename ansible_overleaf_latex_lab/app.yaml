@@ -1,7 +1,7 @@
 app:
   name: overleaf-latex-lab
   label: Overleaf LaTeX Lab
-  version: 1.0.0
+  version: 2.0.0
   description: >
     Ubuntu VM mit selbst gehosteter Overleaf Community Edition für kollaboratives
     LaTeX-Arbeiten im Browser. Die Installation erfolgt über das offizielle
