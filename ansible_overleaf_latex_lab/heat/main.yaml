@@ -9,12 +9,12 @@ description: >
 parameters:
   image:
     type: string
-    default: "Ubuntu 24.04 2026-01"
+    default: "Ubuntu 24.04 2025-01"
     constraints:
       - allowed_values:
           - "Ubuntu 22.04 2025-01"
           - "Ubuntu 24.04 2025-01"
-          - "Ubuntu 24.04 2026-01"
+
     description: "Base image for the VM."
 
   flavor:
