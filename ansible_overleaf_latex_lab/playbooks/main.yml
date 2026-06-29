@@ -364,7 +364,7 @@
                 ((overleaf_admin_create.stdout | default('')) ~ '\n' ~ (overleaf_admin_create.stderr | default('')))
                 | regex_findall('DOZILAB_ACTIVATION_URL=(https?://[^ \n\r\t<"]+)')
               ) | last
-            ) | default('', true)
+            ) | default('', true) | trim
           }}
       when: overleaf_create_users | bool
       no_log: true
@@ -381,7 +381,7 @@
                 ((item.stdout | default('')) ~ '\n' ~ (item.stderr | default('')))
                 | regex_findall('DOZILAB_ACTIVATION_URL=(https?://[^ \n\r\t<"]+)')
               ) | last
-            ) | default('', true)
+            ) | default('', true) | trim
           }}
         overleaf_group_account:
           group: "{{ item.item.group_name | default(item.item.username) }}"
