@@ -71,6 +71,49 @@
         state: started
         enabled: true
 
+    - name: Lehrer zur Docker-Gruppe hinzufuegen
+      user:
+        name: "{{ teacher.linux.username }}"
+        groups: docker
+        append: true
+      when: teacher.linux.username is defined
+
+    - name: Gruppen-Linux-Accounts validieren
+      assert:
+        that:
+          - deployment_groups is defined
+          - item.linux is defined
+          - item.linux.username is defined
+          - item.linux.username is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - item.linux.password is defined
+          - item.linux.password | length > 0
+        fail_msg: "Backend-Credentials fehlen. Erwartet werden deployment_groups[].linux fuer Docker-Lab."
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Gruppen-Linux-Accounts erstellen und Docker-Zugriff erlauben
+      user:
+        name: "{{ item.linux.username }}"
+        shell: /bin/bash
+        create_home: true
+        groups: docker
+        append: true
+        state: present
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Gruppen-Linux-Passwoerter setzen
+      shell: "echo '{{ item.linux.username }}:{{ item.linux.password }}' | chpasswd"
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: SSH fuer Gruppen-Accounts erlauben
+      copy:
+        dest: /etc/ssh/sshd_config.d/98-dozilab-allowusers.conf
+        mode: "0644"
+        content: "AllowUsers ubuntu {{ teacher.linux.username }}{% for group in deployment_groups | default([]) %} {{ group.linux.username }}{% endfor %}\n"
+      notify: SSH neu starten
+
     - name: Ubuntu User zur Docker-Gruppe hinzufuegen
       user:
         name: ubuntu
@@ -97,8 +140,8 @@
       copy:
         dest: "{{ docker_lab_dir }}/html/index.html"
         owner: ubuntu
-        group: ubuntu
-        mode: "0644"
+        group: docker
+        mode: "0664"
         content: |
           <!doctype html>
           <html lang="de">
@@ -176,8 +219,8 @@
       copy:
         dest: "{{ docker_lab_dir }}/docker-compose.yml"
         owner: ubuntu
-        group: ubuntu
-        mode: "0644"
+        group: docker
+        mode: "0664"
         content: |
           services:
             web:
@@ -188,6 +231,17 @@
                 - "80:80"
               volumes:
                 - ./html:/usr/share/nginx/html:ro
+
+    - name: Docker-Lab Projekt fuer Docker-Gruppe schreibbar machen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: ubuntu
+        group: docker
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ docker_lab_dir }}", mode: "2775" }
+        - { path: "{{ docker_lab_dir }}/html", mode: "2775" }
 
     - name: Demo-Container starten
       command: "{{ docker_compose_command.stdout }} up -d"
@@ -241,3 +295,9 @@
         mode: "0644"
         content: |
           DOZILAB_READY app={{ docker_lab_app_name }} stack={{ stack_label | default('docker') }} project={{ docker_lab_dir }}
+
+  handlers:
+    - name: SSH neu starten
+      service:
+        name: ssh
+        state: restarted

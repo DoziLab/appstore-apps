@@ -1,7 +1,7 @@
 app:
   name: ansible-docker-lab
   label: Ansible Docker Lab
-  version: 1.0.0
+  version: 2.0.0
   description: >
     Ubuntu VM mit Docker und Docker Compose fuer Container-Grundlagen.
     Infrastruktur wird per Heat erstellt, Installation und Demo-Container
@@ -113,3 +113,12 @@ outputs:
   - name: root_volume_id
     label: Root Volume ID
     from_heat_output: root_volume_id
+
+credentials:
+  per_group:
+    - linux:
+        username: "{{ username }}"
+        password: generate
+
+  teacher:
+    # teacher.linux automatisch vorhanden — kein Eintrag nötig
