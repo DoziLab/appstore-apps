@@ -5,7 +5,7 @@ bereit. Sie erstellt eine Ubuntu-VM, installiert JupyterHub/JupyterLab und legt
 Kursbenutzer aus den vom Backend erzeugten `deployment_groups` an.
 
 Die VM bootet von einem Cinder Root-Volume. Userdaten liegen unter
-`/home/<user>`. 
+`/home/<user>`.
 
 ## Struktur
 
