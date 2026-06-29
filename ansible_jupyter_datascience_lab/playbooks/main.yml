@@ -595,24 +595,73 @@
       changed_when: false
 
     - name: Auf JupyterHub HTTP warten
-      uri:
-        url: http://127.0.0.1:8000/hub/health
-        status_code: [200]
-        return_content: false
-      register: jupyterhub_health
-      retries: 30
-      delay: 3
-      until: jupyterhub_health.status == 200
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import sys
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = "http://127.0.0.1:8000/hub/health"
+
+        for attempt in range(30):
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    if response.status == 200:
+                        print(f"JupyterHub HTTP ready: {response.status}")
+                        sys.exit(0)
+            except urllib.error.HTTPError as err:
+                if err.code == 200:
+                    print(f"JupyterHub HTTP ready: {err.code}")
+                    sys.exit(0)
+            except Exception:
+                pass
+
+            if attempt < 29:
+                time.sleep(3)
+
+        sys.exit("JupyterHub HTTP did not become ready")
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     - name: Nginx Reverse Proxy lokal prüfen
-      uri:
-        url: http://127.0.0.1/
-        status_code: [200, 302, 403, 405]
-        return_content: false
-      register: nginx_jupyter_check
-      retries: 20
-      delay: 3
-      until: nginx_jupyter_check.status in [200, 302, 403, 405]
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import sys
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = "http://127.0.0.1/"
+        expected = {200, 302, 403, 405}
+
+        for attempt in range(20):
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    if response.status in expected:
+                        print(f"Nginx reverse proxy ready: {response.status}")
+                        sys.exit(0)
+            except urllib.error.HTTPError as err:
+                if err.code in expected:
+                    print(f"Nginx reverse proxy ready: {err.code}")
+                    sys.exit(0)
+            except Exception:
+                pass
+
+            if attempt < 19:
+                time.sleep(3)
+
+        sys.exit("Nginx reverse proxy did not become ready")
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     - name: Ready Marker schreiben
       copy:
