@@ -1,7 +1,7 @@
 app:
   name: ansible-static-website-lab
   label: Ansible Static Website Lab
-  version: 3.0.0
+  version: 3.1.0
   description: >
     Ubuntu VM mit Nginx und getrennten Beispiel-Webseiten pro Kursgruppe.
     Jede Gruppe bearbeitet ihren eigenen Webroot ohne sudo; die Startseite

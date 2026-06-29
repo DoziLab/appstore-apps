@@ -85,7 +85,7 @@
         state: directory
         owner: "{{ item.linux.username }}"
         group: "{{ item.linux.username }}"
-        mode: "2775"
+        mode: "2770"
       loop: "{{ deployment_groups | default([]) }}"
       no_log: true
 
@@ -101,7 +101,7 @@
         dest: "{{ dozilab_site_root }}/{{ item.linux.username }}/index.html"
         owner: "{{ item.linux.username }}"
         group: "{{ item.linux.username }}"
-        mode: "0664"
+        mode: "0660"
         content: |
           <!doctype html>
           <html lang="de">
@@ -184,13 +184,13 @@
       no_log: true
 
     - name: Gruppen-Webroot ACLs setzen
-      command: "setfacl -R -m g:{{ item.linux.username }}:rwX {{ dozilab_site_root }}/{{ item.linux.username }}"
+      command: "setfacl -R -m u:www-data:rX,g:{{ item.linux.username }}:rwX,o::--- {{ dozilab_site_root }}/{{ item.linux.username }}"
       loop: "{{ deployment_groups | default([]) }}"
       changed_when: true
       no_log: true
 
     - name: Gruppen-Webroot Default-ACLs fuer neue Dateien setzen
-      command: "setfacl -R -m d:g:{{ item.linux.username }}:rwX {{ dozilab_site_root }}/{{ item.linux.username }}"
+      command: "setfacl -R -m d:u:www-data:rX,d:g:{{ item.linux.username }}:rwX,d:o::--- {{ dozilab_site_root }}/{{ item.linux.username }}"
       loop: "{{ deployment_groups | default([]) }}"
       changed_when: true
       no_log: true

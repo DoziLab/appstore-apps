@@ -23,8 +23,9 @@ Typische Uebungen:
 - Das Backend verbindet sich per SSH mit der VM.
 - Ansible installiert Nginx und schreibt pro Kursgruppe eine eigene Beispielseite.
 - Ansible erzeugt pro Kursgruppe einen Linux-Login und eine eigene Editor-Gruppe.
-- Jede Gruppe bearbeitet nur ihren Ordner unter `/srv/dozilab/websites/<gruppen-user>`.
+- Jede Gruppe kann nur ihren Ordner unter `/srv/dozilab/websites/<gruppen-user>` lesen und bearbeiten.
 - Der Lehrer/Admin ist Mitglied in allen Editor-Gruppen und kann alle Websites sehen.
+- Nginx bekommt per ACL Leserechte auf alle Gruppen-Webroots, damit die Websites oeffentlich abrufbar bleiben.
 - `/` zeigt eine Uebersicht, Gruppen-Websites liegen unter `/<gruppen-user>/`.
 - Nginx liefert die Dateien direkt aus; nach dem Speichern reicht ein Browser-Refresh.
 - HTTP Port 80 ist nur aus dem konfigurierten `web_cidr` erreichbar.
