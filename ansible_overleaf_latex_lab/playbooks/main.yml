@@ -323,7 +323,7 @@
             rc="$?"
             set -e
             printf '%s\n' "$output"
-            activation_path="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | sed -E 's#^https?://[^/]+##' | tail -n 1 || true)"
+            activation_path="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"\\]+/user/activate\?[^[:space:]<"\\]+' | sed -E 's#^https?://[^/]+##' | tail -n 1 || true)"
             if [ -n "$activation_path" ]; then
               printf 'DOZILAB_ACTIVATION_URL=%s%s\n' "$public_url" "$activation_path"
             fi
@@ -361,7 +361,7 @@
             rc="$?"
             set -e
             printf '%s\n' "$output"
-            activation_path="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | sed -E 's#^https?://[^/]+##' | tail -n 1 || true)"
+            activation_path="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"\\]+/user/activate\?[^[:space:]<"\\]+' | sed -E 's#^https?://[^/]+##' | tail -n 1 || true)"
             if [ -n "$activation_path" ]; then
               printf 'DOZILAB_ACTIVATION_URL=%s%s\n' "$public_url" "$activation_path"
             fi
