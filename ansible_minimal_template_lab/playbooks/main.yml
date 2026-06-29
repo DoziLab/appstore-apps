@@ -9,6 +9,8 @@
     dozilab_mark_dir: /var/lib/dozilab
     dozilab_state_dir: /etc/dozilab
     dozilab_group_root: /srv/dozilab/groups
+    dozilab_web_root: /srv/dozilab/reference-site
+    dozilab_web_unit: dozilab-reference-site.service
     dozilab_create_group_users: "{{ create_group_users | default(true) }}"
     dozilab_welcome_message: "{{ welcome_message | default('Willkommen im DoziLab Template Lab.') }}"
 
@@ -49,6 +51,7 @@
         - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
         - { path: "{{ dozilab_state_dir }}", mode: "0700" }
         - { path: "{{ dozilab_group_root }}", mode: "0755" }
+        - { path: "{{ dozilab_web_root }}", mode: "0755" }
 
     - name: Deployment-Metadaten aus Backend-Variablen schreiben
       copy:
@@ -154,6 +157,36 @@
       when: dozilab_create_group_users | bool
       no_log: true
 
+    - name: Gemeinsames User-File in Gruppenordner kopieren
+      copy:
+        src: /opt/dozilab/user-files/shared/material
+        dest: "{{ dozilab_group_root }}/{{ item.username }}/shared-material"
+        owner: "{{ item.username if (dozilab_create_group_users | bool) else 'root' }}"
+        group: "{{ item.username if (dozilab_create_group_users | bool) else 'root' }}"
+        mode: "0640"
+        remote_src: true
+      loop: "{{ deployment_groups }}"
+      when:
+        - user_files is defined
+        - (user_files.shared_material | default({})).exists | default(false)
+      no_log: true
+
+    - name: Gruppen-User-File in Gruppenordner kopieren
+      copy:
+        src: "/opt/dozilab/user-files/{{ group_file_key }}/material"
+        dest: "{{ dozilab_group_root }}/{{ item.username }}/group-material"
+        owner: "{{ item.username if (dozilab_create_group_users | bool) else 'root' }}"
+        group: "{{ item.username if (dozilab_create_group_users | bool) else 'root' }}"
+        mode: "0640"
+        remote_src: true
+      loop: "{{ deployment_groups }}"
+      vars:
+        group_file_key: "{{ item.group_name | default(item.username) }}"
+      when:
+        - user_files is defined
+        - ((user_files.group_material | default({})).get(group_file_key, {})).exists | default(false)
+      no_log: true
+
     - name: Check-Script ausfuehrbar machen
       file:
         path: /opt/dozilab/scripts/check_template_setup.sh
@@ -166,6 +199,99 @@
       changed_when: false
       no_log: true
 
+    - name: Kleine Referenz-Webseite schreiben
+      copy:
+        dest: "{{ dozilab_web_root }}/index.html"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="de">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>DoziLab Reference App</title>
+            <style>
+              body { font-family: Arial, sans-serif; max-width: 840px; margin: 32px auto; padding: 0 20px; line-height: 1.5; color: #1f2933; }
+              h1 { font-size: 28px; margin-bottom: 8px; }
+              code { background: #eef2f6; padding: 2px 5px; border-radius: 4px; }
+              table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+              th, td { border: 1px solid #d6dde5; padding: 8px; text-align: left; }
+              th { background: #f5f7fa; }
+            </style>
+          </head>
+          <body>
+            <h1>DoziLab Minimal Template Lab</h1>
+            <p>{{ dozilab_welcome_message }}</p>
+            <p>Stack: <code>{{ stack_label | default('demo') }}</code></p>
+            <p>Diese Seite wird vom Ansible-Playbook erzeugt und per systemd mit <code>python3 -m http.server</code> ausgeliefert.</p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Gruppe</th>
+                  <th>Linux-User</th>
+                  <th>Passwort generiert</th>
+                  <th>SSH-Key generiert</th>
+                </tr>
+              </thead>
+              <tbody>
+          {% for group in deployment_groups %}
+                <tr>
+                  <td>{{ group.group_name | default(group.username) }}</td>
+                  <td><code>{{ group.username }}</code></td>
+                  <td>{{ 'ja' if group.linux.password is defined else 'nein' }}</td>
+                  <td>{{ 'ja' if group.linux.ssh_key is defined and group.linux.ssh_key.public_key is defined else 'nein' }}</td>
+                </tr>
+          {% endfor %}
+              </tbody>
+            </table>
+          </body>
+          </html>
+
+    - name: Referenz-Webservice Unit schreiben
+      copy:
+        dest: "/etc/systemd/system/{{ dozilab_web_unit }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=DoziLab minimal reference web page
+          After=network-online.target
+
+          [Service]
+          WorkingDirectory={{ dozilab_web_root }}
+          ExecStart=/usr/bin/python3 -m http.server 80 --bind 0.0.0.0 --directory {{ dozilab_web_root }}
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      register: dozilab_web_unit_file
+
+    - name: systemd neu laden
+      systemd:
+        daemon_reload: true
+      when: dozilab_web_unit_file.changed
+
+    - name: Referenz-Webservice starten
+      service:
+        name: "{{ dozilab_web_unit }}"
+        state: restarted
+        enabled: true
+      when: dozilab_web_unit_file.changed
+
+    - name: Referenz-Webservice sicherstellen
+      service:
+        name: "{{ dozilab_web_unit }}"
+        state: started
+        enabled: true
+
+    - name: Referenz-Webservice pruefen
+      command: systemctl is-active --quiet "{{ dozilab_web_unit }}"
+      changed_when: false
+
     - name: Ready Marker schreiben
       copy:
         dest: "{{ dozilab_mark_dir }}/ready"
@@ -173,4 +299,4 @@
         group: root
         mode: "0644"
         content: |
-          DOZILAB_READY app={{ dozilab_app_name }} stack={{ stack_label | default('demo') }}
+          DOZILAB_READY app={{ dozilab_app_name }} stack={{ stack_label | default('demo') }} url=http://{{ ansible_host | default(inventory_hostname) }}/

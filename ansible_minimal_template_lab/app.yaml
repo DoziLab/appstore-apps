@@ -1,12 +1,15 @@
 app:
   name: ansible-minimal-template-lab
   label: Ansible Minimal Template Lab
-  version: 1.0.0
+  version: 1.1.0
   description: >
     Kleine Referenz-App fuer DoziLab App-Entwickler. Deployt eine Ubuntu-VM,
-    laesst die Infrastruktur durch Heat erstellen und konfiguriert Gruppen-
-    Benutzer, Beispiel-Dateien und Marker per Ansible.
+    laesst die Infrastruktur durch Heat erstellen und zeigt die wichtigsten
+    App-Bausteine: Parameter, Outputs, Credentials, User-Files, Scripts,
+    Config-Files und ein kleines Web-Endpoint.
   owner_team: dozilab-app-team
+
+  allow_user_files: true
 
 artifacts:
   heat_template: heat/main.yaml
@@ -34,7 +37,6 @@ parameters:
     enum:
       - "Ubuntu 22.04 2025-01"
       - "Ubuntu 24.04 2025-01"
-      - "Ubuntu 24.04 2026-01"
 
   - name: flavor
     label: VM-Groesse (Flavor)
@@ -67,6 +69,14 @@ parameters:
     default: "141.72.0.0/16"
     required: true
     description: "Nur dieses Netz darf per SSH zugreifen. Standard: DHBW/VPN."
+
+  - name: web_cidr
+    label: Web-Zugriff (CIDR)
+    step: netzwerk
+    type: string
+    default: "141.72.0.0/16"
+    required: true
+    description: "Nur dieses Netz darf die kleine Referenz-Webseite ueber HTTP Port 80 erreichen."
 
   - name: create_group_users
     label: Gruppen-Benutzer anlegen
@@ -110,7 +120,28 @@ credentials:
   teacher:
     # teacher.linux automatisch vorhanden - kein Eintrag noetig.
 
+user_files:
+  - name: shared_material
+    label: "Gemeinsames Material"
+    description: "Optionale Datei fuer alle Gruppen; landet im Gruppenordner."
+    required: false
+    accept: "*"
+    destination: /opt/dozilab/user-files/shared/material
+    mode: all_stacks
+
+  - name: group_material
+    label: "Gruppenmaterial"
+    description: "Optionale Datei pro Gruppe; zeigt mode=per_group."
+    required: false
+    accept: "*"
+    destination: /opt/dozilab/user-files/{{ group_name }}/material
+    mode: per_group
+
 outputs:
+  - name: reference_url
+    label: Referenz-Webseite
+    from_heat_output: reference_url
+
   - name: ssh_user
     label: SSH User
     from_heat_output: ssh_user
