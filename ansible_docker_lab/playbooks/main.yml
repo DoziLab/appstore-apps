@@ -1,0 +1,243 @@
+---
+- name: DoziLab Docker Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_mark_dir: /var/lib/dozilab
+    docker_lab_dir: /opt/dozilab/docker-lab
+    docker_lab_app_name: ansible-docker-lab
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - stack_label | default('docker') is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfuellen."
+
+    - name: DoziLab und Docker-Lab Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ dozilab_mark_dir }}", owner: root, group: root, mode: "0755" }
+        - { path: "/opt/dozilab", owner: root, group: root, mode: "0755" }
+        - { path: "{{ docker_lab_dir }}", owner: ubuntu, group: ubuntu, mode: "0755" }
+        - { path: "{{ docker_lab_dir }}/html", owner: ubuntu, group: ubuntu, mode: "0755" }
+
+    - name: Docker installieren
+      apt:
+        name:
+          - docker.io
+          - python3
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Docker Compose installieren
+      shell: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+
+        if docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; then
+          echo "compose already installed"
+          exit 0
+        fi
+
+        apt-get update
+
+        for pkg in docker-compose-v2 docker-compose-plugin docker-compose; do
+          if apt-cache show "$pkg" >/dev/null 2>&1; then
+            apt-get install -y "$pkg"
+            echo "installed $pkg"
+            exit 0
+          fi
+        done
+
+        echo "No Docker Compose package available via apt" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: compose_install
+      changed_when: "'installed ' in compose_install.stdout"
+
+    - name: Docker aktivieren und starten
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Ubuntu User zur Docker-Gruppe hinzufuegen
+      user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    - name: Docker Compose Befehl ermitteln
+      shell: |
+        set -euo pipefail
+        if docker compose version >/dev/null 2>&1; then
+          echo "docker compose"
+        elif command -v docker-compose >/dev/null 2>&1; then
+          echo "docker-compose"
+        else
+          echo "Docker Compose not available" >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      register: docker_compose_command
+      changed_when: false
+
+    - name: Demo-Webseite schreiben
+      copy:
+        dest: "{{ docker_lab_dir }}/html/index.html"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="de">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Docker Lab</title>
+            <style>
+              :root {
+                font-family: Arial, Helvetica, sans-serif;
+                background: #f5f7f8;
+                color: #1f2933;
+              }
+              body {
+                margin: 0;
+              }
+              main {
+                width: min(880px, calc(100% - 40px));
+                margin: 64px auto;
+                background: #ffffff;
+                border: 1px solid #d9e0e6;
+                padding: 34px;
+              }
+              h1 {
+                margin: 0 0 12px;
+                font-size: 30px;
+              }
+              p {
+                max-width: 720px;
+                margin: 0 0 16px;
+                line-height: 1.55;
+              }
+              code {
+                padding: 2px 5px;
+                background: #eef2f5;
+              }
+              ul {
+                line-height: 1.7;
+                padding-left: 22px;
+              }
+              .info {
+                margin-top: 28px;
+                padding-top: 16px;
+                border-top: 1px solid #dde3e8;
+                color: #5b6673;
+                font-size: 14px;
+              }
+            </style>
+          </head>
+          <body>
+            <main>
+              <h1>Docker-Lab</h1>
+              <p>
+                Diese Seite wird aus einem Nginx-Container ausgeliefert, der mit
+                Docker Compose gestartet wurde.
+              </p>
+              <p>
+                Das Beispielprojekt liegt auf der VM unter
+                <code>{{ docker_lab_dir }}</code>.
+              </p>
+              <ul>
+                <li><code>docker ps</code> zeigt laufende Container</li>
+                <li><code>{{ docker_compose_command.stdout }} ps</code> zeigt den Compose-Stack</li>
+                <li><code>{{ docker_compose_command.stdout }} logs</code> zeigt Container-Logs</li>
+              </ul>
+              <div class="info">
+                Stack: {{ stack_label | default('docker') }}<br>
+                App: {{ docker_lab_app_name }}
+              </div>
+            </main>
+          </body>
+          </html>
+
+    - name: Docker Compose Datei schreiben
+      copy:
+        dest: "{{ docker_lab_dir }}/docker-compose.yml"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          services:
+            web:
+              image: nginx:alpine
+              container_name: dozilab-docker-lab-web
+              restart: unless-stopped
+              ports:
+                - "80:80"
+              volumes:
+                - ./html:/usr/share/nginx/html:ro
+
+    - name: Demo-Container starten
+      command: "{{ docker_compose_command.stdout }} up -d"
+      args:
+        chdir: "{{ docker_lab_dir }}"
+      register: compose_up
+      changed_when: "'Started' in compose_up.stdout or 'Created' in compose_up.stdout or 'Recreated' in compose_up.stdout or 'Pulling' in compose_up.stderr or 'Downloading' in compose_up.stderr"
+
+    - name: Docker Service pruefen
+      command: systemctl is-active --quiet docker
+      changed_when: false
+
+    - name: Docker Demo HTTP warten
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import sys
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = "http://127.0.0.1/"
+        last_error = None
+
+        for attempt in range(30):
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    if response.status == 200:
+                        print(f"Docker demo HTTP ready: {response.status}")
+                        sys.exit(0)
+            except urllib.error.HTTPError as err:
+                last_error = f"HTTP {err.code}"
+            except Exception as err:
+                last_error = str(err)
+
+            if attempt < 29:
+                time.sleep(3)
+
+        sys.exit(f"Docker demo HTTP did not become ready: {last_error}")
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DOZILAB_READY app={{ docker_lab_app_name }} stack={{ stack_label | default('docker') }} project={{ docker_lab_dir }}

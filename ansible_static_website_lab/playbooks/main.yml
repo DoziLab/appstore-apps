@@ -40,68 +40,74 @@
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>DoziLab Static Website Lab</title>
+            <title>Webserver Uebung</title>
             <style>
               :root {
                 color-scheme: light;
-                font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                background: #f4f7fb;
-                color: #18212f;
+                font-family: Arial, Helvetica, sans-serif;
+                background: #f6f6f3;
+                color: #20242a;
               }
               body {
                 margin: 0;
                 min-height: 100vh;
-                display: grid;
-                place-items: center;
               }
               main {
-                width: min(760px, calc(100% - 48px));
+                width: min(860px, calc(100% - 40px));
+                margin: 72px auto;
                 background: #ffffff;
-                border: 1px solid #d8e0ea;
-                border-radius: 8px;
-                padding: 36px;
-                box-shadow: 0 18px 45px rgba(24, 33, 47, 0.08);
+                border: 1px solid #d9d9d3;
+                padding: 34px;
               }
               h1 {
-                margin: 0 0 12px;
-                font-size: 32px;
-                line-height: 1.15;
+                margin: 0 0 10px;
+                font-size: 30px;
+                line-height: 1.2;
               }
               p {
-                margin: 0 0 18px;
-                font-size: 17px;
-                line-height: 1.6;
+                max-width: 680px;
+                margin: 0 0 16px;
+                font-size: 16px;
+                line-height: 1.55;
+              }
+              ul {
+                margin: 18px 0 0;
+                padding-left: 22px;
+                line-height: 1.7;
               }
               code {
-                display: inline-block;
-                padding: 3px 7px;
-                border-radius: 6px;
-                background: #edf2f7;
-                color: #253247;
+                padding: 2px 5px;
+                background: #eeeeea;
               }
-              .meta {
-                margin-top: 24px;
-                padding-top: 20px;
-                border-top: 1px solid #e4eaf1;
-                color: #526175;
+              .info {
+                margin-top: 28px;
+                padding-top: 16px;
+                border-top: 1px solid #e4e4df;
+                color: #5b6470;
                 font-size: 14px;
               }
             </style>
           </head>
           <body>
             <main>
-              <h1>DoziLab Static Website Lab</h1>
+              <h1>Webserver-Uebung</h1>
               <p>
-                Diese VM wurde per Heat erstellt und anschliessend per Ansible
-                als Nginx-Webserver konfiguriert.
+                Diese Seite wird von einem Nginx-Webserver auf einer DoziLab-VM
+                ausgeliefert. Sie kann als Ausgangspunkt fuer einfache
+                HTML-, CSS- und JavaScript-Aufgaben genutzt werden.
               </p>
               <p>
-                Eigene HTML-, CSS- und JavaScript-Dateien koennen unter
-                <code>/var/www/html</code> abgelegt werden.
+                Die Dateien der Website liegen auf dem Server im Verzeichnis
+                <code>/var/www/html</code>.
               </p>
-              <div class="meta">
-                App: {{ dozilab_app_name }}<br>
-                Stack: {{ stack_label | default('web') }}
+              <ul>
+                <li>per SSH auf die VM verbinden</li>
+                <li><code>index.html</code> bearbeiten oder ersetzen</li>
+                <li>Seite im Browser neu laden und Aenderungen pruefen</li>
+              </ul>
+              <div class="info">
+                Stack: {{ stack_label | default('web') }}<br>
+                Bereitgestellt mit Heat und Ansible.
               </div>
             </main>
           </body>
