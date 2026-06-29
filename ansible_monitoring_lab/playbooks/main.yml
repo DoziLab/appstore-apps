@@ -16,6 +16,32 @@
           - stack_label | default('monitoring') is match('^[a-z0-9][a-z0-9-]{0,30}$')
         fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfuellen."
 
+    - name: Monitoring Backend-Credentials validieren
+      assert:
+        that:
+          - teacher.linux is defined
+          - teacher.linux.username is defined
+          - teacher.linux.password is defined
+          - teacher.linux.password | length > 0
+          - deployment_groups is defined
+          - deployment_groups | length > 0
+        fail_msg: "Backend-Credentials fehlen. Erwartet werden teacher.linux und deployment_groups[].linux."
+      no_log: true
+
+    - name: Monitoring Gruppen-Credentials validieren
+      assert:
+        that:
+          - item.linux is defined
+          - item.linux.username is defined
+          - item.linux.username is match('^[a-z_][a-z0-9_-]{0,31}$')
+          - item.linux.password is defined
+          - item.linux.password | length > 0
+          - item.email is defined
+          - "'@' in item.email"
+        fail_msg: "Ungueltige Monitoring Gruppen-Credentials."
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
     - name: DoziLab und Monitoring-Verzeichnisse erstellen
       file:
         path: "{{ item.path }}"
@@ -31,6 +57,20 @@
         - { path: "{{ monitoring_lab_dir }}/grafana/provisioning/datasources", owner: ubuntu, group: ubuntu, mode: "0755" }
         - { path: "{{ monitoring_lab_dir }}/grafana/provisioning/dashboards", owner: ubuntu, group: ubuntu, mode: "0755" }
         - { path: "{{ monitoring_lab_dir }}/grafana/dashboards", owner: ubuntu, group: ubuntu, mode: "0755" }
+
+    - name: Gruppen-Linux-Accounts erstellen
+      user:
+        name: "{{ item.linux.username }}"
+        shell: /bin/bash
+        create_home: true
+        state: present
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Gruppen-Linux-Passwoerter setzen
+      shell: "echo '{{ item.linux.username }}:{{ item.linux.password }}' | chpasswd"
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
 
     - name: Docker installieren
       apt:
@@ -498,11 +538,11 @@
               ports:
                 - "80:3000"
               environment:
-                GF_SECURITY_ADMIN_USER: admin
-                GF_SECURITY_ADMIN_PASSWORD: admin
+                GF_SECURITY_ADMIN_USER: "{{ teacher.linux.username }}"
+                GF_SECURITY_ADMIN_PASSWORD: "{{ teacher.linux.password }}"
                 GF_USERS_ALLOW_SIGN_UP: "false"
-                GF_AUTH_ANONYMOUS_ENABLED: "true"
-                GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+                GF_USERS_AUTO_ASSIGN_ORG: "false"
+                GF_AUTH_ANONYMOUS_ENABLED: "false"
                 GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dozilab-node.json
               volumes:
                 - grafana-data:/var/lib/grafana
@@ -514,6 +554,7 @@
           volumes:
             prometheus-data:
             grafana-data:
+      no_log: true
 
     - name: Monitoring Stack starten
       command: "{{ docker_compose_command.stdout }} up -d"
@@ -559,6 +600,173 @@
       args:
         executable: /bin/bash
       changed_when: false
+
+    - name: Grafana Gruppen-Setup JSON schreiben
+      copy:
+        dest: "{{ monitoring_lab_dir }}/grafana-groups.json"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {
+            "admin": {
+              "username": {{ teacher.linux.username | to_json }},
+              "password": {{ teacher.linux.password | to_json }}
+            },
+            "groups": [
+          {% for group in deployment_groups | default([]) %}
+              {
+                "org": {{ group.group_name | default(group.username) | to_json }},
+                "login": {{ group.linux.username | to_json }},
+                "email": {{ group.email | to_json }},
+                "password": {{ group.linux.password | to_json }}
+              }{% if not loop.last %},{% endif %}
+          {% endfor %}
+            ]
+          }
+      no_log: true
+
+    - name: Grafana Gruppen und Benutzer einrichten
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import base64
+        import json
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        from pathlib import Path
+
+        setup = json.loads(Path("{{ monitoring_lab_dir }}/grafana-groups.json").read_text(encoding="utf-8"))
+        dashboard = json.loads(Path("{{ monitoring_lab_dir }}/grafana/dashboards/dozilab-node.json").read_text(encoding="utf-8"))
+
+        base = "http://127.0.0.1"
+        admin_user = setup["admin"]["username"]
+        admin_password = setup["admin"]["password"]
+        auth = base64.b64encode(f"{admin_user}:{admin_password}".encode()).decode()
+
+        def request(method, path, payload=None, org_id=None, allowed=(200, 201)):
+            data = None
+            headers = {
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            if org_id is not None:
+                headers["X-Grafana-Org-Id"] = str(org_id)
+            if payload is not None:
+                data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    body = resp.read().decode("utf-8", errors="ignore")
+                    if resp.status not in allowed:
+                        raise RuntimeError(f"{method} {path} returned {resp.status}: {body}")
+                    return json.loads(body) if body else {}
+            except urllib.error.HTTPError as err:
+                body = err.read().decode("utf-8", errors="ignore")
+                if err.code in allowed:
+                    return json.loads(body) if body else {}
+                raise RuntimeError(f"{method} {path} returned {err.code}: {body}") from err
+
+        def wait_ready():
+            for _ in range(60):
+                try:
+                    health = request("GET", "/api/health", allowed=(200,))
+                    if str(health.get("database", "")).lower() == "ok":
+                        return
+                except Exception:
+                    pass
+                time.sleep(2)
+            raise RuntimeError("Grafana API did not become ready")
+
+        def lookup_user(login_or_email):
+            query = urllib.parse.quote(login_or_email, safe="")
+            try:
+                return request("GET", f"/api/users/lookup?loginOrEmail={query}", allowed=(200,))
+            except RuntimeError as err:
+                if "returned 404" in str(err):
+                    return None
+                raise
+
+        def ensure_user(entry):
+            existing = lookup_user(entry["login"])
+            if existing:
+                return existing["id"]
+            created = request("POST", "/api/admin/users", {
+                "name": entry["org"],
+                "email": entry["email"],
+                "login": entry["login"],
+                "password": entry["password"],
+            }, allowed=(200, 201))
+            return created["id"]
+
+        def get_org_by_name(name):
+            query = urllib.parse.quote(name, safe="")
+            try:
+                return request("GET", f"/api/orgs/name/{query}", allowed=(200,))
+            except RuntimeError as err:
+                if "returned 404" in str(err):
+                    return None
+                raise
+
+        def ensure_org(name):
+            existing = get_org_by_name(name)
+            if existing:
+                return existing["id"]
+            created = request("POST", "/api/orgs", {"name": name}, allowed=(200, 201))
+            return created["orgId"]
+
+        def ensure_org_user(org_id, login):
+            users = request("GET", f"/api/orgs/{org_id}/users", allowed=(200,))
+            for user in users:
+                if user.get("login") == login:
+                    request("PATCH", f"/api/orgs/{org_id}/users/{user['userId']}", {"role": "Editor"}, allowed=(200,))
+                    return
+            request("POST", f"/api/orgs/{org_id}/users", {"loginOrEmail": login, "role": "Editor"}, allowed=(200,))
+
+        def ensure_datasource(org_id):
+            datasources = request("GET", "/api/datasources", org_id=org_id, allowed=(200,))
+            for ds in datasources:
+                if ds.get("uid") == "Prometheus" or ds.get("name") == "Prometheus":
+                    return
+            request("POST", "/api/datasources", {
+                "name": "Prometheus",
+                "uid": "Prometheus",
+                "type": "prometheus",
+                "access": "proxy",
+                "url": "http://prometheus:9090",
+                "isDefault": True,
+            }, org_id=org_id, allowed=(200, 201))
+
+        def ensure_dashboard(org_id, org_name):
+            model = dict(dashboard)
+            model["id"] = None
+            model["uid"] = "dozilab-node-overview"
+            model["title"] = f"{org_name} - Node Overview"
+            request("POST", "/api/dashboards/db", {
+                "dashboard": model,
+                "folderId": 0,
+                "overwrite": True,
+            }, org_id=org_id, allowed=(200,))
+
+        wait_ready()
+        for entry in setup["groups"]:
+            org_name = f"DoziLab {entry['org']}"
+            ensure_user(entry)
+            org_id = ensure_org(org_name)
+            ensure_org_user(org_id, entry["login"])
+            ensure_datasource(org_id)
+            ensure_dashboard(org_id, entry["org"])
+            print(f"configured {entry['login']} in org {org_name}")
+        PY
+      args:
+        executable: /bin/bash
+      register: grafana_group_setup
+      changed_when: true
+      no_log: true
 
     - name: Monitoring Container pruefen
       shell: |

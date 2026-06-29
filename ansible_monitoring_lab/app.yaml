@@ -1,7 +1,7 @@
 app:
   name: ansible-monitoring-lab
   label: Ansible Monitoring Lab
-  version: 1.0.0
+  version: 2.0.0
   description: >
     Ubuntu VM mit Grafana, Prometheus und Node Exporter fuer Monitoring-
     und Observability-Grundlagen. Infrastruktur wird per Heat erstellt,
@@ -113,3 +113,14 @@ outputs:
   - name: root_volume_id
     label: Root Volume ID
     from_heat_output: root_volume_id
+
+credentials:
+  per_group:
+    - linux:
+        username: "{{ username }}"
+        password: generate
+
+  teacher:
+    - linux:
+        username: admin
+        password: generate

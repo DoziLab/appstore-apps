@@ -25,16 +25,20 @@ Typische Uebungen:
 - Docker Compose startet Grafana, Prometheus und Node Exporter.
 - Grafana ist ueber HTTP Port 80 erreichbar.
 - Prometheus und Node Exporter sind nur intern im Compose-Netz erreichbar.
+- Pro Kursgruppe wird eine eigene Grafana-Organization mit eigenem Login
+  angelegt. Gruppen sehen und bearbeiten dadurch nur ihren eigenen
+  Grafana-Arbeitsbereich.
 
 ## Login
 
-Grafana ist fuer Dashboard-Ansicht anonym lesbar. Fuer Admin-Aenderungen:
+DoziLab erzeugt beim Deployment Logins:
 
-```text
-admin / admin
-```
+- `admin` fuer den Dozenten/Administrator
+- ein Login pro Kursgruppe
 
-Das Passwort sollte bei produktiver Nutzung geaendert werden.
+Die Grafana-Logins verwenden dieselben generierten DoziLab-Credentials, die in
+den Deployment-Credentials angezeigt werden. Anonymer Grafana-Zugriff ist
+deaktiviert.
 
 ## Wichtige Dateien
 
