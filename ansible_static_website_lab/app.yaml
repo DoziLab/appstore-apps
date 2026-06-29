@@ -1,10 +1,11 @@
 app:
   name: ansible-static-website-lab
   label: Ansible Static Website Lab
-  version: 2.0.0
+  version: 3.0.0
   description: >
-    Ubuntu VM mit Nginx und einer einfachen Beispiel-Webseite.
-    Infrastruktur wird per Heat erstellt, die Webserver-Konfiguration laeuft per Ansible.
+    Ubuntu VM mit Nginx und getrennten Beispiel-Webseiten pro Kursgruppe.
+    Jede Gruppe bearbeitet ihren eigenen Webroot ohne sudo; die Startseite
+    verlinkt alle Gruppen-Websites.
   owner_team: dozilab-app-team
 
 artifacts:

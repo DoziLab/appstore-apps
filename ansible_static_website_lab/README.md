@@ -13,7 +13,7 @@ Typische Uebungen:
 
 - Website ueber HTTP im Browser aufrufen
 - per SSH auf die VM gehen
-- Dateien unter `/var/www/html` ohne sudo bearbeiten
+- eigene Gruppen-Website ohne sudo bearbeiten
 - Nginx-Konfiguration ansehen
 - Deployment-Ablauf Heat plus Ansible nachvollziehen
 
@@ -21,11 +21,12 @@ Typische Uebungen:
 
 - Heat erstellt VM, Root-Volume, Security Group und Floating IP.
 - Das Backend verbindet sich per SSH mit der VM.
-- Ansible installiert Nginx und schreibt eine Beispielseite.
-- Ansible erzeugt pro Kursgruppe einen Linux-Login und nimmt ihn in die
-  Gruppe `webedit` auf.
-- `/var/www/html` ist fuer `webedit` schreibbar. Nginx liefert die Dateien
-  direkt aus; nach dem Speichern reicht ein Browser-Refresh.
+- Ansible installiert Nginx und schreibt pro Kursgruppe eine eigene Beispielseite.
+- Ansible erzeugt pro Kursgruppe einen Linux-Login und eine eigene Editor-Gruppe.
+- Jede Gruppe bearbeitet nur ihren Ordner unter `/srv/dozilab/websites/<gruppen-user>`.
+- Der Lehrer/Admin ist Mitglied in allen Editor-Gruppen und kann alle Websites sehen.
+- `/` zeigt eine Uebersicht, Gruppen-Websites liegen unter `/<gruppen-user>/`.
+- Nginx liefert die Dateien direkt aus; nach dem Speichern reicht ein Browser-Refresh.
 - HTTP Port 80 ist nur aus dem konfigurierten `web_cidr` erreichbar.
 - SSH Port 22 ist nur aus dem konfigurierten `ssh_cidr` erreichbar.
 
@@ -49,7 +50,7 @@ Auf der VM:
 
 ```bash
 curl -I http://127.0.0.1/
-nano /var/www/html/index.html
-ls -la /var/www/html
+nano /srv/dozilab/websites/<gruppen-user>/index.html
+ls -la /srv/dozilab/websites/<gruppen-user>
 cat /var/lib/dozilab/ready
 ```

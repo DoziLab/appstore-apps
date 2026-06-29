@@ -6,9 +6,9 @@
 
   vars:
     dozilab_mark_dir: /var/lib/dozilab
-    dozilab_site_root: /var/www/html
+    dozilab_site_root: /srv/dozilab/websites
+    dozilab_landing_root: /var/www/html
     dozilab_app_name: ansible-static-website-lab
-    dozilab_web_group: webedit
 
   tasks:
     - name: DoziLab Verzeichnisse erstellen
@@ -20,7 +20,9 @@
         mode: "{{ item.mode }}"
       loop:
         - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
-        - { path: "{{ dozilab_site_root }}", mode: "2775" }
+        - { path: "/srv/dozilab", mode: "0755" }
+        - { path: "{{ dozilab_site_root }}", mode: "0755" }
+        - { path: "{{ dozilab_landing_root }}", mode: "0755" }
 
     - name: Nginx installieren
       apt:
@@ -31,22 +33,11 @@
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Web-Editor-Gruppe erstellen
-      group:
-        name: "{{ dozilab_web_group }}"
-        state: present
-
-    - name: Lehrer zur Web-Editor-Gruppe hinzufuegen
-      user:
-        name: "{{ teacher.linux.username }}"
-        groups: "{{ dozilab_web_group }}"
-        append: true
-      when: teacher.linux.username is defined
-
     - name: Gruppen-Linux-Accounts validieren
       assert:
         that:
           - deployment_groups is defined
+          - deployment_groups | length > 0
           - item.linux is defined
           - item.linux.username is defined
           - item.linux.username is match('^[a-z_][a-z0-9_-]{0,31}$')
@@ -56,12 +47,28 @@
       loop: "{{ deployment_groups | default([]) }}"
       no_log: true
 
-    - name: Gruppen-Linux-Accounts erstellen und Webroot-Zugriff erlauben
+    - name: Web-Editor-Gruppen pro Kursgruppe erstellen
+      group:
+        name: "{{ item.linux.username }}"
+        state: present
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
+    - name: Lehrer zu allen Web-Editor-Gruppen hinzufuegen
+      user:
+        name: "{{ teacher.linux.username }}"
+        groups: "{{ (deployment_groups | default([]) | map(attribute='linux.username') | list) | join(',') }}"
+        append: true
+      when:
+        - teacher.linux.username is defined
+        - deployment_groups | default([]) | length > 0
+
+    - name: Gruppen-Linux-Accounts erstellen und eigene Webroot erlauben
       user:
         name: "{{ item.linux.username }}"
         shell: /bin/bash
         create_home: true
-        groups: "{{ dozilab_web_group }}"
+        group: "{{ item.linux.username }}"
         append: true
         state: present
       loop: "{{ deployment_groups | default([]) }}"
@@ -72,6 +79,16 @@
       loop: "{{ deployment_groups | default([]) }}"
       no_log: true
 
+    - name: Gruppen-Webroots erstellen
+      file:
+        path: "{{ dozilab_site_root }}/{{ item.linux.username }}"
+        state: directory
+        owner: "{{ item.linux.username }}"
+        group: "{{ item.linux.username }}"
+        mode: "2775"
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
+
     - name: SSH fuer Gruppen-Accounts erlauben
       copy:
         dest: /etc/ssh/sshd_config.d/98-dozilab-allowusers.conf
@@ -79,19 +96,11 @@
         content: "AllowUsers ubuntu {{ teacher.linux.username }}{% for group in deployment_groups | default([]) %} {{ group.linux.username }}{% endfor %}\n"
       notify: SSH neu starten
 
-    - name: Webroot fuer Bearbeitung ohne sudo vorbereiten
-      file:
-        path: "{{ dozilab_site_root }}"
-        state: directory
-        owner: root
-        group: "{{ dozilab_web_group }}"
-        mode: "2775"
-
-    - name: Standard-Webseite schreiben
+    - name: Gruppen-Startseiten schreiben
       copy:
-        dest: "{{ dozilab_site_root }}/index.html"
-        owner: root
-        group: "{{ dozilab_web_group }}"
+        dest: "{{ dozilab_site_root }}/{{ item.linux.username }}/index.html"
+        owner: "{{ item.linux.username }}"
+        group: "{{ item.linux.username }}"
         mode: "0664"
         content: |
           <!doctype html>
@@ -99,7 +108,7 @@
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Webserver Uebung</title>
+            <title>{{ item.group_name | default(item.linux.username) }} Website</title>
             <style>
               :root {
                 color-scheme: light;
@@ -149,35 +158,82 @@
           </head>
           <body>
             <main>
-              <h1>Webserver-Uebung</h1>
+              <h1>{{ item.group_name | default(item.linux.username) }}</h1>
               <p>
-                Diese Seite wird von einem Nginx-Webserver auf einer DoziLab-VM
-                ausgeliefert. Sie kann als Ausgangspunkt fuer einfache
-                HTML-, CSS- und JavaScript-Aufgaben genutzt werden.
+                Das ist die eigene Website dieser Kursgruppe. Aenderungen an
+                dieser Datei sind sofort nach dem Speichern im Browser sichtbar.
               </p>
               <p>
-                Die Dateien der Website liegen auf dem Server im Verzeichnis
-                <code>/var/www/html</code>.
+                Bearbeiten:
+                <code>nano {{ dozilab_site_root }}/{{ item.linux.username }}/index.html</code>
               </p>
               <ul>
-                <li>per SSH auf die VM verbinden</li>
-                <li><code>nano /var/www/html/index.html</code> ausfuehren</li>
-                <li>speichern und die Seite im Browser neu laden</li>
+                <li>Diese Gruppe: <code>/{{ item.linux.username }}/</code></li>
+                <li>Webroot: <code>{{ dozilab_site_root }}/{{ item.linux.username }}</code></li>
+                <li>Nach dem Speichern Browser neu laden</li>
               </ul>
               <div class="info">
                 Stack: {{ stack_label | default('web') }}<br>
+                Login: {{ item.linux.username }}<br>
                 Bereitgestellt mit Heat und Ansible.
               </div>
             </main>
           </body>
           </html>
+      loop: "{{ deployment_groups | default([]) }}"
+      no_log: true
 
-    - name: Webroot ACLs fuer neue Dateien setzen
-      command: "{{ item }}"
-      loop:
-        - "setfacl -R -m g:{{ dozilab_web_group }}:rwX {{ dozilab_site_root }}"
-        - "setfacl -R -m d:g:{{ dozilab_web_group }}:rwX {{ dozilab_site_root }}"
+    - name: Gruppen-Webroot ACLs setzen
+      command: "setfacl -R -m g:{{ item.linux.username }}:rwX {{ dozilab_site_root }}/{{ item.linux.username }}"
+      loop: "{{ deployment_groups | default([]) }}"
       changed_when: true
+      no_log: true
+
+    - name: Gruppen-Webroot Default-ACLs fuer neue Dateien setzen
+      command: "setfacl -R -m d:g:{{ item.linux.username }}:rwX {{ dozilab_site_root }}/{{ item.linux.username }}"
+      loop: "{{ deployment_groups | default([]) }}"
+      changed_when: true
+      no_log: true
+
+    - name: Landing-Page mit Gruppenuebersicht schreiben
+      copy:
+        dest: "{{ dozilab_landing_root }}/index.html"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="de">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>DoziLab Websites</title>
+            <style>
+              :root { font-family: Arial, Helvetica, sans-serif; color: #20242a; background: #f5f7f8; }
+              body { margin: 0; }
+              main { width: min(900px, calc(100% - 40px)); margin: 56px auto; background: #fff; border: 1px solid #d9e0e6; padding: 32px; }
+              h1 { margin: 0 0 12px; font-size: 30px; }
+              p { line-height: 1.55; }
+              ul { line-height: 1.9; padding-left: 22px; }
+              code { background: #eef2f5; padding: 2px 5px; }
+              a { color: #0f5c9c; }
+            </style>
+          </head>
+          <body>
+            <main>
+              <h1>DoziLab Websites</h1>
+              <p>Jede Kursgruppe bearbeitet ihre eigene Website.</p>
+              <ul>
+          {% for group in deployment_groups | default([]) %}
+                <li>
+                  <a href="/{{ group.linux.username }}/">{{ group.group_name | default(group.linux.username) }}</a>
+                  <span> - <code>{{ dozilab_site_root }}/{{ group.linux.username }}/index.html</code></span>
+                </li>
+          {% endfor %}
+              </ul>
+            </main>
+          </body>
+          </html>
 
     - name: Nginx Default Site konfigurieren
       copy:
@@ -190,7 +246,7 @@
               listen 80 default_server;
               listen [::]:80 default_server;
 
-              root /var/www/html;
+              root {{ dozilab_landing_root }};
               index index.html;
 
               server_name _;
@@ -198,6 +254,14 @@
               location / {
                   try_files $uri $uri/ =404;
               }
+
+          {% for group in deployment_groups | default([]) %}
+              location /{{ group.linux.username }}/ {
+                  alias {{ dozilab_site_root }}/{{ group.linux.username }}/;
+                  index index.html;
+                  try_files $uri $uri/ =404;
+              }
+          {% endfor %}
           }
       register: nginx_default_site
 
