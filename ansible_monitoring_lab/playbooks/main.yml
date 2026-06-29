@@ -1,0 +1,587 @@
+---
+- name: DoziLab Monitoring Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_mark_dir: /var/lib/dozilab
+    monitoring_lab_dir: /opt/dozilab/monitoring-lab
+    monitoring_lab_app_name: ansible-monitoring-lab
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - stack_label | default('monitoring') is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfuellen."
+
+    - name: DoziLab und Monitoring-Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ dozilab_mark_dir }}", owner: root, group: root, mode: "0755" }
+        - { path: "/opt/dozilab", owner: root, group: root, mode: "0755" }
+        - { path: "{{ monitoring_lab_dir }}", owner: ubuntu, group: ubuntu, mode: "0755" }
+        - { path: "{{ monitoring_lab_dir }}/prometheus", owner: ubuntu, group: ubuntu, mode: "0755" }
+        - { path: "{{ monitoring_lab_dir }}/grafana/provisioning/datasources", owner: ubuntu, group: ubuntu, mode: "0755" }
+        - { path: "{{ monitoring_lab_dir }}/grafana/provisioning/dashboards", owner: ubuntu, group: ubuntu, mode: "0755" }
+        - { path: "{{ monitoring_lab_dir }}/grafana/dashboards", owner: ubuntu, group: ubuntu, mode: "0755" }
+
+    - name: Docker installieren
+      apt:
+        name:
+          - docker.io
+          - python3
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Docker Compose installieren
+      shell: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+
+        if docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; then
+          echo "compose already installed"
+          exit 0
+        fi
+
+        apt-get update
+
+        for pkg in docker-compose-v2 docker-compose-plugin docker-compose; do
+          if apt-cache show "$pkg" >/dev/null 2>&1; then
+            apt-get install -y "$pkg"
+            echo "installed $pkg"
+            exit 0
+          fi
+        done
+
+        echo "No Docker Compose package available via apt" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: compose_install
+      changed_when: "'installed ' in compose_install.stdout"
+
+    - name: Docker aktivieren und starten
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Ubuntu User zur Docker-Gruppe hinzufuegen
+      user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    - name: Docker Compose Befehl ermitteln
+      shell: |
+        set -euo pipefail
+        if docker compose version >/dev/null 2>&1; then
+          echo "docker compose"
+        elif command -v docker-compose >/dev/null 2>&1; then
+          echo "docker-compose"
+        else
+          echo "Docker Compose not available" >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      register: docker_compose_command
+      changed_when: false
+
+    - name: Prometheus Konfiguration schreiben
+      copy:
+        dest: "{{ monitoring_lab_dir }}/prometheus/prometheus.yml"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          global:
+            scrape_interval: 15s
+
+          scrape_configs:
+            - job_name: prometheus
+              static_configs:
+                - targets:
+                    - prometheus:9090
+
+            - job_name: node
+              static_configs:
+                - targets:
+                    - node-exporter:9100
+
+    - name: Grafana Datasource schreiben
+      copy:
+        dest: "{{ monitoring_lab_dir }}/grafana/provisioning/datasources/prometheus.yml"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          apiVersion: 1
+
+          datasources:
+            - name: Prometheus
+              uid: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+              editable: true
+
+    - name: Grafana Dashboard Provider schreiben
+      copy:
+        dest: "{{ monitoring_lab_dir }}/grafana/provisioning/dashboards/default.yml"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          apiVersion: 1
+
+          providers:
+            - name: DoziLab
+              orgId: 1
+              folder: DoziLab
+              type: file
+              disableDeletion: false
+              editable: true
+              options:
+                path: /var/lib/grafana/dashboards
+
+    - name: Grafana Dashboard schreiben
+      copy:
+        dest: "{{ monitoring_lab_dir }}/grafana/dashboards/dozilab-node.json"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          {
+            "annotations": {
+              "list": [
+                {
+                  "builtIn": 1,
+                  "datasource": {
+                    "type": "grafana",
+                    "uid": "-- Grafana --"
+                  },
+                  "enable": true,
+                  "hide": true,
+                  "iconColor": "rgba(0, 211, 255, 1)",
+                  "name": "Annotations & Alerts",
+                  "type": "dashboard"
+                }
+              ]
+            },
+            "editable": true,
+            "fiscalYearStartMonth": 0,
+            "graphTooltip": 0,
+            "links": [],
+            "liveNow": false,
+            "panels": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "Prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": {
+                      "mode": "thresholds"
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                      "mode": "absolute",
+                      "steps": [
+                        { "color": "green", "value": null },
+                        { "color": "orange", "value": 70 },
+                        { "color": "red", "value": 90 }
+                      ]
+                    },
+                    "unit": "percent"
+                  },
+                  "overrides": []
+                },
+                "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+                "id": 1,
+                "options": {
+                  "reduceOptions": {
+                    "calcs": ["lastNotNull"],
+                    "fields": "",
+                    "values": false
+                  }
+                },
+                "pluginVersion": "11.5.0",
+                "targets": [
+                  {
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "Prometheus"
+                    },
+                    "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+                    "legendFormat": "CPU",
+                    "refId": "A"
+                  }
+                ],
+                "title": "CPU-Auslastung",
+                "type": "gauge"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "Prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": {
+                      "mode": "thresholds"
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                      "mode": "absolute",
+                      "steps": [
+                        { "color": "green", "value": null },
+                        { "color": "orange", "value": 70 },
+                        { "color": "red", "value": 90 }
+                      ]
+                    },
+                    "unit": "percent"
+                  },
+                  "overrides": []
+                },
+                "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+                "id": 2,
+                "options": {
+                  "reduceOptions": {
+                    "calcs": ["lastNotNull"],
+                    "fields": "",
+                    "values": false
+                  }
+                },
+                "pluginVersion": "11.5.0",
+                "targets": [
+                  {
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "Prometheus"
+                    },
+                    "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+                    "legendFormat": "RAM",
+                    "refId": "A"
+                  }
+                ],
+                "title": "Speicherverbrauch",
+                "type": "gauge"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "Prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": {
+                      "mode": "thresholds"
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                      "mode": "absolute",
+                      "steps": [
+                        { "color": "green", "value": null },
+                        { "color": "orange", "value": 70 },
+                        { "color": "red", "value": 90 }
+                      ]
+                    },
+                    "unit": "percent"
+                  },
+                  "overrides": []
+                },
+                "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+                "id": 3,
+                "options": {
+                  "reduceOptions": {
+                    "calcs": ["lastNotNull"],
+                    "fields": "",
+                    "values": false
+                  }
+                },
+                "pluginVersion": "11.5.0",
+                "targets": [
+                  {
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "Prometheus"
+                    },
+                    "expr": "100 - ((node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"rootfs\"} * 100) / node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"rootfs\"})",
+                    "legendFormat": "Disk",
+                    "refId": "A"
+                  }
+                ],
+                "title": "Root-Disk Nutzung",
+                "type": "gauge"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "Prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": {
+                      "mode": "palette-classic"
+                    },
+                    "custom": {
+                      "drawStyle": "line",
+                      "lineInterpolation": "linear",
+                      "lineWidth": 1,
+                      "pointSize": 5,
+                      "showPoints": "never"
+                    },
+                    "mappings": [],
+                    "unit": "short"
+                  },
+                  "overrides": []
+                },
+                "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
+                "id": 4,
+                "options": {
+                  "legend": {
+                    "calcs": ["lastNotNull"],
+                    "displayMode": "list",
+                    "placement": "bottom",
+                    "showLegend": true
+                  },
+                  "tooltip": {
+                    "mode": "single",
+                    "sort": "none"
+                  }
+                },
+                "targets": [
+                  {
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "Prometheus"
+                    },
+                    "expr": "node_load1",
+                    "legendFormat": "Load 1m",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "Prometheus"
+                    },
+                    "expr": "node_load5",
+                    "legendFormat": "Load 5m",
+                    "refId": "B"
+                  }
+                ],
+                "title": "Load Average",
+                "type": "timeseries"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "Prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": {
+                      "mode": "palette-classic"
+                    },
+                    "custom": {
+                      "drawStyle": "line",
+                      "lineInterpolation": "linear",
+                      "lineWidth": 1,
+                      "pointSize": 5,
+                      "showPoints": "never"
+                    },
+                    "mappings": [],
+                    "unit": "Bps"
+                  },
+                  "overrides": []
+                },
+                "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
+                "id": 5,
+                "options": {
+                  "legend": {
+                    "calcs": ["lastNotNull"],
+                    "displayMode": "list",
+                    "placement": "bottom",
+                    "showLegend": true
+                  },
+                  "tooltip": {
+                    "mode": "single",
+                    "sort": "none"
+                  }
+                },
+                "targets": [
+                  {
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "Prometheus"
+                    },
+                    "expr": "rate(node_network_receive_bytes_total{device!=\"lo\"}[5m])",
+                    "legendFormat": "RX",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "Prometheus"
+                    },
+                    "expr": "rate(node_network_transmit_bytes_total{device!=\"lo\"}[5m])",
+                    "legendFormat": "TX",
+                    "refId": "B"
+                  }
+                ],
+                "title": "Netzwerktraffic",
+                "type": "timeseries"
+              }
+            ],
+            "refresh": "15s",
+            "schemaVersion": 40,
+            "tags": ["dozilab", "monitoring"],
+            "templating": {
+              "list": []
+            },
+            "time": {
+              "from": "now-30m",
+              "to": "now"
+            },
+            "timepicker": {},
+            "timezone": "browser",
+            "title": "DoziLab Node Overview",
+            "uid": "dozilab-node-overview",
+            "version": 1,
+            "weekStart": ""
+          }
+
+    - name: Docker Compose Datei schreiben
+      copy:
+        dest: "{{ monitoring_lab_dir }}/docker-compose.yml"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          services:
+            prometheus:
+              image: prom/prometheus:v3.1.0
+              container_name: dozilab-prometheus
+              restart: unless-stopped
+              command:
+                - "--config.file=/etc/prometheus/prometheus.yml"
+                - "--storage.tsdb.retention.time=7d"
+              volumes:
+                - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+                - prometheus-data:/prometheus
+
+            node-exporter:
+              image: prom/node-exporter:v1.8.2
+              container_name: dozilab-node-exporter
+              restart: unless-stopped
+              pid: host
+              command:
+                - "--path.rootfs=/host"
+              volumes:
+                - /:/host:ro,rslave
+
+            grafana:
+              image: grafana/grafana:11.5.0
+              container_name: dozilab-grafana
+              restart: unless-stopped
+              ports:
+                - "80:3000"
+              environment:
+                GF_SECURITY_ADMIN_USER: admin
+                GF_SECURITY_ADMIN_PASSWORD: admin
+                GF_USERS_ALLOW_SIGN_UP: "false"
+                GF_AUTH_ANONYMOUS_ENABLED: "true"
+                GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+                GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dozilab-node.json
+              volumes:
+                - grafana-data:/var/lib/grafana
+                - ./grafana/provisioning:/etc/grafana/provisioning:ro
+                - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+              depends_on:
+                - prometheus
+
+          volumes:
+            prometheus-data:
+            grafana-data:
+
+    - name: Monitoring Stack starten
+      command: "{{ docker_compose_command.stdout }} up -d"
+      args:
+        chdir: "{{ monitoring_lab_dir }}"
+      register: compose_up
+      changed_when: "'Started' in compose_up.stdout or 'Created' in compose_up.stdout or 'Recreated' in compose_up.stdout or 'Pulling' in compose_up.stderr or 'Downloading' in compose_up.stderr"
+
+    - name: Docker Service pruefen
+      command: systemctl is-active --quiet docker
+      changed_when: false
+
+    - name: Grafana HTTP warten
+      shell: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import sys
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = "http://127.0.0.1/api/health"
+        last_error = None
+
+        for attempt in range(60):
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    body = response.read().decode("utf-8", errors="ignore")
+                    if response.status == 200 and "ok" in body.lower():
+                        print(f"Grafana HTTP ready: {response.status}")
+                        sys.exit(0)
+            except urllib.error.HTTPError as err:
+                last_error = f"HTTP {err.code}"
+            except Exception as err:
+                last_error = str(err)
+
+            if attempt < 59:
+                time.sleep(5)
+
+        sys.exit(f"Grafana HTTP did not become ready: {last_error}")
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Monitoring Container pruefen
+      shell: |
+        set -euo pipefail
+
+        for name in dozilab-grafana dozilab-prometheus dozilab-node-exporter; do
+          state="$(docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "$name")"
+          if [ "$state" != "true" ]; then
+            echo "$name is not running" >&2
+            exit 1
+          fi
+        done
+
+        echo "Monitoring containers running"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DOZILAB_READY app={{ monitoring_lab_app_name }} stack={{ stack_label | default('monitoring') }} project={{ monitoring_lab_dir }}
