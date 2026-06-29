@@ -226,23 +226,11 @@
         regexp: '^#?OVERLEAF_ADMIN_EMAIL='
         line: "OVERLEAF_ADMIN_EMAIL={{ overleaf_admin_email_value }}"
 
-    - name: Overleaf Legacy Admin E-Mail setzen
-      lineinfile:
-        path: "{{ overleaf_dir }}/config/variables.env"
-        regexp: '^#?SHARELATEX_ADMIN_EMAIL='
-        line: "SHARELATEX_ADMIN_EMAIL={{ overleaf_admin_email_value }}"
-
     - name: Overleaf Site URL setzen
       lineinfile:
         path: "{{ overleaf_dir }}/config/variables.env"
         regexp: '^#?OVERLEAF_SITE_URL='
         line: "OVERLEAF_SITE_URL={{ overleaf_public_url }}"
-
-    - name: Overleaf Legacy Site URL setzen
-      lineinfile:
-        path: "{{ overleaf_dir }}/config/variables.env"
-        regexp: '^#?SHARELATEX_SITE_URL='
-        line: "SHARELATEX_SITE_URL={{ overleaf_public_url }}"
 
     - name: Alte Overleaf Runtime-Konfiguration entfernen
       lineinfile:
