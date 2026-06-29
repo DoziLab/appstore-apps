@@ -29,6 +29,7 @@
     overleaf_admin_email_value: "{{ overleaf_admin_email | default('admin@dozilab.local') }}"
     overleaf_create_users: "{{ create_overleaf_users | default(true) }}"
     overleaf_user_domain_value: "{{ overleaf_user_domain | default('dozilab.local') }}"
+    overleaf_public_url: "http://{{ ansible_host | default(inventory_hostname) }}"
 
   tasks:
     - name: Stack-Label validieren
@@ -225,11 +226,23 @@
         regexp: '^#?OVERLEAF_ADMIN_EMAIL='
         line: "OVERLEAF_ADMIN_EMAIL={{ overleaf_admin_email_value }}"
 
+    - name: Overleaf Legacy Admin E-Mail setzen
+      lineinfile:
+        path: "{{ overleaf_dir }}/config/variables.env"
+        regexp: '^#?SHARELATEX_ADMIN_EMAIL='
+        line: "SHARELATEX_ADMIN_EMAIL={{ overleaf_admin_email_value }}"
+
     - name: Overleaf Site URL setzen
       lineinfile:
         path: "{{ overleaf_dir }}/config/variables.env"
         regexp: '^#?OVERLEAF_SITE_URL='
-        line: "OVERLEAF_SITE_URL=http://{{ ansible_host | default(inventory_hostname) }}"
+        line: "OVERLEAF_SITE_URL={{ overleaf_public_url }}"
+
+    - name: Overleaf Legacy Site URL setzen
+      lineinfile:
+        path: "{{ overleaf_dir }}/config/variables.env"
+        regexp: '^#?SHARELATEX_SITE_URL='
+        line: "SHARELATEX_SITE_URL={{ overleaf_public_url }}"
 
     - name: Alte Overleaf Runtime-Konfiguration entfernen
       lineinfile:
@@ -316,14 +329,15 @@
           - -ce
           - |
             cd /overleaf/services/web
+            public_url={{ overleaf_public_url | quote }}
             set +e
             output="$(node modules/server-ce-scripts/scripts/create-user --admin --email={{ overleaf_admin_email_value | quote }} 2>&1)"
             rc="$?"
             set -e
             printf '%s\n' "$output"
-            activation_url="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | tail -n 1 || true)"
-            if [ -n "$activation_url" ]; then
-              printf 'DOZILAB_ACTIVATION_URL=%s\n' "$activation_url"
+            activation_path="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | sed -E 's#^https?://[^/]+##' | tail -n 1 || true)"
+            if [ -n "$activation_path" ]; then
+              printf 'DOZILAB_ACTIVATION_URL=%s%s\n' "$public_url" "$activation_path"
             fi
             if printf '%s\n' "$output" | grep -qi 'usage:'; then
               exit 64
@@ -353,14 +367,15 @@
           - -ce
           - |
             cd /overleaf/services/web
+            public_url={{ overleaf_public_url | quote }}
             set +e
             output="$(node modules/server-ce-scripts/scripts/create-user --email={{ overleaf_group_email | quote }} 2>&1)"
             rc="$?"
             set -e
             printf '%s\n' "$output"
-            activation_url="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | tail -n 1 || true)"
-            if [ -n "$activation_url" ]; then
-              printf 'DOZILAB_ACTIVATION_URL=%s\n' "$activation_url"
+            activation_path="$(printf '%s\n' "$output" | grep -Eo 'https?://[^[:space:]<"]+/user/activate\?token=[^[:space:]<"]+' | sed -E 's#^https?://[^/]+##' | tail -n 1 || true)"
+            if [ -n "$activation_path" ]; then
+              printf 'DOZILAB_ACTIVATION_URL=%s%s\n' "$public_url" "$activation_path"
             fi
             if printf '%s\n' "$output" | grep -qi 'usage:'; then
               exit 64
