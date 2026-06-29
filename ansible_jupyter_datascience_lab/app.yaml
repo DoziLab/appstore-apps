@@ -1,7 +1,7 @@
 app:
   name: ansible-jupyter-datascience-lab
   label: Ansible Jupyter Data Science Lab
-  version: 2.0.0
+  version: 2.0.1
   description: >
     Ubuntu VM mit JupyterHub, JupyterLab und Data-Science-Paketen.
     Lokale Kursbenutzer werden aus Backend-Credentials erstellt.
