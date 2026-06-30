@@ -1,7 +1,7 @@
 app:
   name: ansible-postgres-group-db
   label: Ansible PostgreSQL Group DB
-  version: 2.0.0
+  version: 2.1.0
   description: >
     Ubuntu VM mit PostgreSQL, Gruppen-Datenbanken, Teacher-Zugriff und optionalem pgAdmin.
     Infrastruktur wird per Heat erstellt, Konfiguration läuft per Ansible.

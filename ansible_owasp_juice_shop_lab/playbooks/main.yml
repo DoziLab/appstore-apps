@@ -46,9 +46,10 @@
           - item.juice_shop is defined
           - item.juice_shop.username is defined
           - item.juice_shop.username is match('^[a-z_][a-z0-9_]{0,31}$')
+          - item.juice_shop.username != teacher.juice_shop.username
           - item.juice_shop.password is defined
           - item.juice_shop.password | length >= 6
-        fail_msg: "Ungueltige Gruppen-Credentials. Erwartet deployment_groups[].juice_shop.username/password."
+        fail_msg: "Ungueltige Gruppen-Credentials. Erwartet deployment_groups[].juice_shop.username/password ohne Kollision mit teacher.juice_shop.username."
       loop: "{{ deployment_groups }}"
       no_log: true
 
@@ -113,22 +114,46 @@
           }
       no_log: true
 
-    - name: Basic-Auth-Dateien fuer Gruppen erstellen
-      shell: |
-        set -euo pipefail
-        htpasswd -Bbc "{{ auth_file }}" "{{ group_user }}" "{{ group_password }}"
-        htpasswd -Bb "{{ auth_file }}" "{{ teacher_user }}" "{{ teacher_password }}"
-        chmod 0600 "{{ auth_file }}"
-        chown root:www-data "{{ auth_file }}"
-      args:
-        executable: /bin/bash
+    - name: Basic-Auth-Dateien mit Gruppen-User erstellen
+      command:
+        argv:
+          - htpasswd
+          - -B
+          - -i
+          - -c
+          - "{{ auth_file }}"
+          - "{{ group_user }}"
+        stdin: "{{ group_password }}"
       loop: "{{ deployment_groups }}"
       vars:
         auth_file: "/etc/nginx/dozilab-juice-auth/{{ item.username }}.htpasswd"
         group_user: "{{ item.juice_shop.username }}"
         group_password: "{{ item.juice_shop.password }}"
+      no_log: true
+
+    - name: Teacher Basic-Auth-User zu Gruppen-Dateien hinzufuegen
+      command:
+        argv:
+          - htpasswd
+          - -B
+          - -i
+          - "{{ auth_file }}"
+          - "{{ teacher_user }}"
+        stdin: "{{ teacher_password }}"
+      loop: "{{ deployment_groups }}"
+      vars:
+        auth_file: "/etc/nginx/dozilab-juice-auth/{{ item.username }}.htpasswd"
         teacher_user: "{{ teacher.juice_shop.username }}"
         teacher_password: "{{ teacher.juice_shop.password }}"
+      no_log: true
+
+    - name: Basic-Auth-Dateien absichern
+      file:
+        path: "/etc/nginx/dozilab-juice-auth/{{ item.username }}.htpasswd"
+        owner: root
+        group: www-data
+        mode: "0640"
+      loop: "{{ deployment_groups }}"
       no_log: true
 
     - name: Juice-Shop Container pro Gruppe starten
