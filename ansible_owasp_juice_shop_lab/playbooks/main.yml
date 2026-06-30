@@ -1,0 +1,346 @@
+---
+- name: DoziLab OWASP Juice Shop Lab Setup
+  hosts: all
+  remote_user: ubuntu
+  become: true
+
+  vars:
+    dozilab_app_name: owasp-juice-shop-lab
+    dozilab_mark_dir: /var/lib/dozilab
+    dozilab_state_dir: /etc/dozilab
+    dozilab_web_root: /srv/dozilab/juice-shop
+    dozilab_nginx_site: /etc/nginx/sites-available/dozilab-juice-shop
+    dozilab_public_port_base: 30000
+    dozilab_backend_port_base: 31000
+    dozilab_max_group_instances: "{{ max_group_instances | default(50) }}"
+    dozilab_juice_shop_image: "{{ juice_shop_image | default('bkimminich/juice-shop:latest') }}"
+
+  tasks:
+    - name: Stack-Label validieren
+      assert:
+        that:
+          - stack_label | default('juice') is match('^[a-z0-9][a-z0-9-]{0,30}$')
+        fail_msg: "stack_label muss ^[a-z0-9][a-z0-9-]{0,30}$ erfuellen."
+
+    - name: Backend-Gruppen und Teacher-Credentials validieren
+      assert:
+        that:
+          - deployment_groups is defined
+          - deployment_groups | length > 0
+          - deployment_groups | length <= (dozilab_max_group_instances | int)
+          - deployment_groups | length <= 100
+          - teacher is defined
+          - teacher.juice_shop is defined
+          - teacher.juice_shop.username is defined
+          - teacher.juice_shop.username is match('^[a-z_][a-z0-9_]{0,31}$')
+          - teacher.juice_shop.password is defined
+          - teacher.juice_shop.password | length >= 6
+        fail_msg: "Erwartet deployment_groups[].juice_shop und teacher.juice_shop; max_group_instances beachten."
+      no_log: true
+
+    - name: Gruppen-Credentials validieren
+      assert:
+        that:
+          - item.username is defined
+          - item.username is match('^[a-z_][a-z0-9_]{0,31}$')
+          - item.juice_shop is defined
+          - item.juice_shop.username is defined
+          - item.juice_shop.username is match('^[a-z_][a-z0-9_]{0,31}$')
+          - item.juice_shop.password is defined
+          - item.juice_shop.password | length >= 6
+        fail_msg: "Ungueltige Gruppen-Credentials. Erwartet deployment_groups[].juice_shop.username/password."
+      loop: "{{ deployment_groups }}"
+      no_log: true
+
+    - name: Basis-Pakete installieren
+      apt:
+        name:
+          - apache2-utils
+          - curl
+          - docker.io
+          - nginx
+          - python3
+        state: present
+        update_cache: true
+
+    - name: Docker aktivieren
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: DoziLab Verzeichnisse erstellen
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ dozilab_mark_dir }}", mode: "0755" }
+        - { path: "{{ dozilab_state_dir }}", mode: "0700" }
+        - { path: "{{ dozilab_web_root }}", mode: "0755" }
+        - { path: "/etc/nginx/dozilab-juice-auth", mode: "0700" }
+
+    - name: Juice-Shop Docker-Image ziehen
+      command: docker pull {{ dozilab_juice_shop_image }}
+      changed_when: "'Downloaded newer image' in docker_pull.stdout or 'Pull complete' in docker_pull.stdout"
+      register: docker_pull
+
+    - name: Gruppen-Instanzdaten schreiben
+      copy:
+        dest: "{{ dozilab_state_dir }}/juice-shop-groups.json"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {
+            "app": {{ dozilab_app_name | to_json }},
+            "stack_label": {{ stack_label | default('juice') | to_json }},
+            "image": {{ dozilab_juice_shop_image | to_json }},
+            "groups": [
+          {% for group in deployment_groups %}
+              {
+                "group_name": {{ group.group_name | default(group.username) | to_json }},
+                "username": {{ group.username | to_json }},
+                "auth_username": {{ group.juice_shop.username | to_json }},
+                "public_port": {{ dozilab_public_port_base + loop.index0 }},
+                "backend_port": {{ dozilab_backend_port_base + loop.index0 }},
+                "container": {{ ('dozilab-juice-' ~ group.username) | to_json }}
+              }{% if not loop.last %},{% endif %}
+          {% endfor %}
+            ]
+          }
+      no_log: true
+
+    - name: Basic-Auth-Dateien fuer Gruppen erstellen
+      shell: |
+        set -euo pipefail
+        htpasswd -Bbc "{{ auth_file }}" "{{ group_user }}" "{{ group_password }}"
+        htpasswd -Bb "{{ auth_file }}" "{{ teacher_user }}" "{{ teacher_password }}"
+        chmod 0600 "{{ auth_file }}"
+        chown root:www-data "{{ auth_file }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ deployment_groups }}"
+      vars:
+        auth_file: "/etc/nginx/dozilab-juice-auth/{{ item.username }}.htpasswd"
+        group_user: "{{ item.juice_shop.username }}"
+        group_password: "{{ item.juice_shop.password }}"
+        teacher_user: "{{ teacher.juice_shop.username }}"
+        teacher_password: "{{ teacher.juice_shop.password }}"
+      no_log: true
+
+    - name: Juice-Shop Container pro Gruppe starten
+      shell: |
+        set -euo pipefail
+        docker rm -f "{{ container_name }}" >/dev/null 2>&1 || true
+        docker run \
+          --detach \
+          --name "{{ container_name }}" \
+          --restart unless-stopped \
+          --publish "127.0.0.1:{{ backend_port }}:3000" \
+          --label "dozilab.app={{ dozilab_app_name }}" \
+          --label "dozilab.stack={{ stack_label | default('juice') }}" \
+          --label "dozilab.group={{ item.username }}" \
+          "{{ dozilab_juice_shop_image }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ deployment_groups }}"
+      vars:
+        container_name: "dozilab-juice-{{ item.username }}"
+        backend_port: "{{ dozilab_backend_port_base + ansible_loop.index0 }}"
+      loop_control:
+        extended: true
+      no_log: true
+
+    - name: Nginx Default Site entfernen
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Gruppen-Uebersichtsseite schreiben
+      copy:
+        dest: "{{ dozilab_web_root }}/index.html"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="de">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>DoziLab OWASP Juice Shop</title>
+            <style>
+              body { font-family: Arial, sans-serif; max-width: 980px; margin: 32px auto; padding: 0 20px; line-height: 1.5; color: #1f2933; }
+              h1 { font-size: 28px; margin-bottom: 8px; }
+              p { color: #46515f; }
+              table { border-collapse: collapse; width: 100%; margin-top: 18px; }
+              th, td { border: 1px solid #d6dde5; padding: 9px; text-align: left; }
+              th { background: #f5f7fa; }
+              code { background: #eef2f6; padding: 2px 5px; border-radius: 4px; }
+              a { color: #0b5cad; }
+            </style>
+          </head>
+          <body>
+            <h1>DoziLab OWASP Juice Shop</h1>
+            <p>Jede Gruppe arbeitet in einer eigenen Juice-Shop-Instanz. Die Gruppenports sind per Basic Auth geschuetzt.</p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Gruppe</th>
+                  <th>Benutzer</th>
+                  <th>Instanz</th>
+                </tr>
+              </thead>
+              <tbody>
+          {% for group in deployment_groups %}
+                <tr>
+                  <td>{{ group.group_name | default(group.username) }}</td>
+                  <td><code>{{ group.juice_shop.username }}</code></td>
+                  <td><a data-port="{{ dozilab_public_port_base + loop.index0 }}" href="#">Juice Shop oeffnen</a></td>
+                </tr>
+          {% endfor %}
+              </tbody>
+            </table>
+            <script>
+              document.querySelectorAll("a[data-port]").forEach(function(link) {
+                var port = link.getAttribute("data-port");
+                link.href = window.location.protocol + "//" + window.location.hostname + ":" + port + "/";
+              });
+            </script>
+          </body>
+          </html>
+
+    - name: Nginx Site fuer Gruppeninstanzen schreiben
+      copy:
+        dest: "{{ dozilab_nginx_site }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              server_name _;
+              root {{ dozilab_web_root }};
+              index index.html;
+
+              location / {
+                  try_files $uri $uri/ /index.html;
+              }
+          }
+
+          {% for group in deployment_groups %}
+          server {
+              listen {{ dozilab_public_port_base + loop.index0 }};
+              server_name _;
+
+              auth_basic "DoziLab Juice Shop {{ group.group_name | default(group.username) }}";
+              auth_basic_user_file /etc/nginx/dozilab-juice-auth/{{ group.username }}.htpasswd;
+
+              client_max_body_size 20m;
+
+              location / {
+                  proxy_pass http://127.0.0.1:{{ dozilab_backend_port_base + loop.index0 }};
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_read_timeout 300;
+              }
+          }
+
+          {% endfor %}
+
+    - name: Nginx Site aktivieren
+      file:
+        src: "{{ dozilab_nginx_site }}"
+        dest: /etc/nginx/sites-enabled/dozilab-juice-shop
+        state: link
+
+    - name: Nginx Konfiguration pruefen
+      command: nginx -t
+      changed_when: false
+
+    - name: Nginx starten
+      service:
+        name: nginx
+        state: restarted
+        enabled: true
+
+    - name: Auf Juice-Shop Instanzen warten
+      uri:
+        url: "http://127.0.0.1:{{ dozilab_backend_port_base + ansible_loop.index0 }}/"
+        status_code: [200, 304]
+        return_content: false
+      loop: "{{ deployment_groups }}"
+      loop_control:
+        extended: true
+      register: juice_health
+      retries: 30
+      delay: 5
+      until: juice_health.status in [200, 304]
+      no_log: true
+
+    - name: Gruppenports ueber Nginx pruefen
+      uri:
+        url: "http://127.0.0.1:{{ dozilab_public_port_base + ansible_loop.index0 }}/"
+        url_username: "{{ item.juice_shop.username }}"
+        url_password: "{{ item.juice_shop.password }}"
+        force_basic_auth: true
+        status_code: [200, 304]
+        return_content: false
+      loop: "{{ deployment_groups }}"
+      loop_control:
+        extended: true
+      register: nginx_group_health
+      retries: 10
+      delay: 3
+      until: nginx_group_health.status in [200, 304]
+      no_log: true
+
+    - name: Uebersichtsseite lokal pruefen
+      uri:
+        url: http://127.0.0.1/
+        status_code: [200]
+        return_content: false
+      register: overview_health
+      retries: 10
+      delay: 3
+      until: overview_health.status == 200
+
+    - name: MOTD setzen
+      copy:
+        dest: /etc/motd
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DoziLab OWASP Juice Shop Lab
+          Stack: {{ stack_label | default('juice') }}
+          Overview: http://<floating_ip>/
+          Group ports: {{ dozilab_public_port_base }}-{{ dozilab_public_port_base + (deployment_groups | length) - 1 }}
+
+    - name: Ready Marker schreiben
+      copy:
+        dest: "{{ dozilab_mark_dir }}/ready"
+        owner: root
+        group: root
+        mode: "0644"
+        content: "DOZILAB_READY stack={{ stack_label | default('juice') }} groups={{ deployment_groups | length }} time={{ ansible_facts.date_time.iso8601 }}\n"
+
+    - name: Fail Marker entfernen falls vorhanden
+      file:
+        path: "{{ dozilab_mark_dir }}/failed"
+        state: absent
+
+    - name: Abschluss anzeigen
+      debug:
+        msg:
+          - "DoziLab OWASP Juice Shop Setup OK"
+          - "Groups: {{ deployment_groups | length }}"
+          - "Overview: http://<floating_ip>/"

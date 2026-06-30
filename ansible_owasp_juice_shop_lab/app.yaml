@@ -1,47 +1,64 @@
 app:
   name: owasp-juice-shop-lab
   label: OWASP Juice Shop Lab
-  version: 1.0.0
+  version: 2.0.0
   description: >
-    Deploys an isolated OWASP Juice Shop instance for web security courses.
-    The lab exposes the training app over HTTP and keeps access restricted by CIDR.
+    Deploys isolated OWASP Juice Shop instances for web security courses.
+    Each course group gets its own container and Basic Auth credentials.
+    Infrastructure is created by Heat, configuration runs via Ansible.
   owner_team: dozilab-app-team
 
 artifacts:
-  heat_template: heat/main.yaml
-  cloud_init: cloud-init/user-data.yaml
+  heat_template:    heat/main.yaml
+  ansible_playbook: playbooks/main.yml
 
 parameters:
   - name: stack_label
-    label: Label
+    label: Stack-Label
     step: template
     type: string
-    default: "juice"
+    default: juice
     required: true
-    description: "Short label for VM names and log markers."
+    description: >
+      Kurzes Label fuer VM-Namen und Metadaten, z.B. juice-ws2026.
+      Muss passen zu: ^[a-z0-9][a-z0-9-]{0,30}$
 
   - name: image
-    label: Image
+    label: Betriebssystem-Image
     step: konfiguration
     type: string
     default: "Ubuntu 22.04 2025-01"
+    required: true
     enum:
       - "Ubuntu 22.04 2025-01"
       - "Ubuntu 24.04 2025-01"
       - "Ubuntu 24.04 2026-01"
-    required: true
-    description: "Ubuntu image for the VM."
 
   - name: flavor
-    label: Flavor
+    label: VM-Groesse (Flavor)
     step: konfiguration
     type: string
     default: "gp1.small"
+    required: true
     enum:
       - "gp1.small"
       - "gp1.medium"
+    description: >
+      gp1.small reicht fuer wenige Gruppen. Fuer mehrere parallele Juice-Shop-
+      Container ist gp1.medium sinnvoll.
+
+  - name: volume_size
+    label: Speicher (GB)
+    step: konfiguration
+    type: number
+    default: 16
+    enum:
+      - 16
+      - 32
+      - 64
+      - 128
     required: true
-    description: "VM size. gp1.small is enough for a small Juice Shop lab."
+    description: "Groesse der Root-Disk als Cinder-Volume (Boot from Volume)."
 
   - name: ssh_cidr
     label: SSH erlaubtes Netz (CIDR)
@@ -59,6 +76,29 @@ parameters:
     required: true
     description: "CIDR allowed to open the Juice Shop web UI."
 
+  - name: juice_shop_image
+    label: Juice-Shop Docker Image
+    step: konfiguration
+    type: string
+    default: "bkimminich/juice-shop:latest"
+    required: true
+    description: "Docker-Image fuer die Gruppen-Instanzen."
+
+  - name: max_group_instances
+    label: Maximale Gruppeninstanzen
+    step: konfiguration
+    type: number
+    default: 50
+    enum:
+      - 10
+      - 25
+      - 50
+      - 100
+    required: true
+    description: >
+      Sicherheitslimit fuer die Anzahl parallel gestarteter Juice-Shop-
+      Container auf dieser VM.
+
   - name: network
     label: Internes Netzwerk
     step: netzwerk
@@ -75,39 +115,42 @@ parameters:
     hidden: true
     description: "Network used for Floating IPs."
 
-  - name: key_name
-    label: SSH-Key
-    step: zugriff
-    type: string
-    default: "heat-bastion-key"
-    hidden: true
-    description: "SSH key for admin access."
+credentials:
+  per_group:
+    - juice_shop:
+        username: "{{ username }}"
+        password: generate
+
+  teacher:
+    - juice_shop:
+        username: "{{ username }}"
+        password: generate
 
 outputs:
   - name: ssh_user
+    label: SSH User
     from_heat_output: ssh_user
-    description: "SSH username."
 
   - name: floating_ip
+    label: Floating IP
     from_heat_output: floating_ip
-    description: "Floating IP of the VM."
 
   - name: private_ip
+    label: Private IP
     from_heat_output: private_ip
-    description: "Private IP of the VM."
 
   - name: server_id
+    label: Server ID
     from_heat_output: server_id
-    description: "Nova server ID."
 
   - name: web_url
+    label: Gruppen-Uebersicht
     from_heat_output: web_url
-    description: "Juice Shop URL."
 
   - name: ssh_hint
+    label: SSH Hinweis
     from_heat_output: ssh_hint
-    description: "SSH example command."
 
-  - name: ready_marker
-    from_heat_output: ready_marker
-    description: "Marker in the console log when setup is complete."
+  - name: root_volume_id
+    label: Root Volume ID
+    from_heat_output: root_volume_id

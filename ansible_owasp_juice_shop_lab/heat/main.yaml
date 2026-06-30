@@ -1,15 +1,11 @@
 heat_template_version: 2018-08-31
 
-description: OWASP Juice Shop web security lab for DoziLab courses.
+description: >
+  DoziLab Ansible OWASP Juice Shop Lab.
+  Heat erstellt nur die OpenStack-Infrastruktur. Die Konfiguration laeuft
+  danach per Ansible vom Backend aus ueber SSH.
 
 parameters:
-  stack_label:
-    type: string
-    default: "juice"
-    constraints:
-      - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
-    description: "Short label for names and log markers."
-
   image:
     type: string
     default: "Ubuntu 22.04 2025-01"
@@ -18,7 +14,7 @@ parameters:
           - "Ubuntu 22.04 2025-01"
           - "Ubuntu 24.04 2025-01"
           - "Ubuntu 24.04 2026-01"
-    description: "Ubuntu image for the VM."
+    description: "Base image for the VM."
 
   flavor:
     type: string
@@ -28,6 +24,34 @@ parameters:
           - "gp1.small"
           - "gp1.medium"
     description: "Nova flavor."
+
+  volume_size:
+    type: number
+    default: 16
+    constraints:
+      - range: { min: 16, max: 200 }
+    description: "Root volume size in GB."
+
+  ssh_cidr:
+    type: string
+    default: "141.72.0.0/16"
+    constraints:
+      - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to SSH and ICMP."
+
+  web_cidr:
+    type: string
+    default: "141.72.0.0/16"
+    constraints:
+      - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    description: "IPv4 CIDR allowed to HTTP and group Juice Shop ports."
+
+  stack_label:
+    type: string
+    default: "juice"
+    constraints:
+      - allowed_pattern: '^[a-z0-9][a-z0-9-]{0,30}$'
+    description: "Internal label used for resource names/metadata."
 
   network:
     type: string
@@ -43,40 +67,24 @@ parameters:
 
   key_name:
     type: string
-    default: "heat-bastion-key"
-    constraints:
-      - allowed_values: ["heat-bastion-key"]
-
-  ssh_cidr:
-    type: string
-    default: "141.72.0.0/16"
-    constraints:
-      - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
-    description: "CIDR allowed to SSH."
-
-  web_cidr:
-    type: string
-    default: "141.72.0.0/16"
-    constraints:
-      - allowed_pattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
-    description: "CIDR allowed to access Juice Shop over HTTP."
-
-  user_json:
-    type: string
-    default: '{"course_label":"","instance":{},"applications":[]}'
-    description: "Optional backend payload. This lab stores it only for debugging."
+    description: "Admin/support SSH keypair. Backend should set this from ANSIBLE_SSH_KEY_NAME."
 
 resources:
   secgroup:
     type: OS::Neutron::SecurityGroup
     properties:
-      description: Security group for OWASP Juice Shop Lab
+      description: SSH, HTTP und Juice-Shop-Gruppenports aus erlaubten CIDRs
       rules:
         - direction: ingress
           ethertype: IPv4
           protocol: tcp
           port_range_min: 22
           port_range_max: 22
+          remote_ip_prefix: { get_param: ssh_cidr }
+
+        - direction: ingress
+          ethertype: IPv4
+          protocol: icmp
           remote_ip_prefix: { get_param: ssh_cidr }
 
         - direction: ingress
@@ -88,8 +96,10 @@ resources:
 
         - direction: ingress
           ethertype: IPv4
-          protocol: icmp
-          remote_ip_prefix: { get_param: ssh_cidr }
+          protocol: tcp
+          port_range_min: 30000
+          port_range_max: 30099
+          remote_ip_prefix: { get_param: web_cidr }
 
         - direction: egress
           ethertype: IPv4
@@ -101,6 +111,20 @@ resources:
       security_groups:
         - { get_resource: secgroup }
 
+  root_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: "dozilab-juice-STACK-root"
+          params:
+            STACK: { get_param: stack_label }
+      size: { get_param: volume_size }
+      image: { get_param: image }
+      metadata:
+        dozilab_stack_label: { get_param: stack_label }
+        dozilab_app: "owasp-juice-shop-lab"
+
   server:
     type: OS::Nova::Server
     properties:
@@ -109,25 +133,18 @@ resources:
           template: "dozilab-juice-STACK"
           params:
             STACK: { get_param: stack_label }
-      image: { get_param: image }
       flavor: { get_param: flavor }
       key_name: { get_param: key_name }
+      block_device_mapping_v2:
+        - boot_index: 0
+          volume_id: { get_resource: root_volume }
+          delete_on_termination: true
       networks:
         - port: { get_resource: port }
       metadata:
         dozilab_stack_label: { get_param: stack_label }
-        dozilab_ready_marker: "DOZILAB_READY"
-      user_data_format: RAW
-      user_data:
-        str_replace:
-          template: { get_file: ../cloud-init/user-data.yaml }
-          params:
-            __STACK_LABEL__: { get_param: stack_label }
-            __USER_JSON__:
-              str_replace:
-                template: { get_param: user_json }
-                params:
-                  "\n": "\n      "
+        dozilab_config_method: "ansible"
+        dozilab_app: "owasp-juice-shop-lab"
 
   fip:
     type: OS::Neutron::FloatingIP
@@ -141,42 +158,38 @@ resources:
       port_id: { get_resource: port }
 
 outputs:
-  ssh_user:
-    description: SSH username
-    value: ubuntu
-
-  floating_ip:
-    description: Public floating IP
-    value: { get_attr: [fip, floating_ip_address] }
-
-  private_ip:
-    description: Private IP on tenant network
-    value: { get_attr: [port, fixed_ips, 0, ip_address] }
-
-  server_id:
-    description: Nova server ID
-    value: { get_resource: server }
-
   web_url:
-    description: Juice Shop URL
+    description: "Group overview page."
     value:
       str_replace:
         template: "http://FIP/"
         params:
           FIP: { get_attr: [fip, floating_ip_address] }
 
+  ssh_user:
+    description: "Admin SSH username."
+    value: ubuntu
+
+  floating_ip:
+    description: "Public floating IP address."
+    value: { get_attr: [fip, floating_ip_address] }
+
+  private_ip:
+    description: "Private IP on tenant network."
+    value: { get_attr: [port, fixed_ips, 0, ip_address] }
+
+  server_id:
+    description: "Nova server ID."
+    value: { get_resource: server }
+
   ssh_hint:
-    description: SSH command
+    description: "Admin SSH command."
     value:
       str_replace:
         template: "ssh -i ~/.ssh/heat-bastion-key.pem ubuntu@FIP"
         params:
           FIP: { get_attr: [fip, floating_ip_address] }
 
-  ready_marker:
-    description: Marker in Nova console log after cloud-init finished
-    value:
-      str_replace:
-        template: "DOZILAB_READY stack=STACK"
-        params:
-          STACK: { get_param: stack_label }
+  root_volume_id:
+    description: "Cinder root volume ID."
+    value: { get_resource: root_volume }
