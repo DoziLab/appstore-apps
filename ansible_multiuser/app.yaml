@@ -61,6 +61,7 @@ parameters:
     enum:
       - "gp1.small"
       - "gp1.medium"
+      - "m1.extra_large"
 
   - name: volume_size
     label: Speicher (GB)
