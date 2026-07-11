@@ -24,6 +24,7 @@ parameters:
       - allowed_values:
           - "gp1.small"
           - "gp1.medium"
+          - "m1.extra_large"
     description: "VM size. Keep small/medium for student workloads."
 
   volume_size:
